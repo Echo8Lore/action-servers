@@ -26,11 +26,25 @@ TRIPLE="x86_64-unknown-linux-gnu"
 [[ $EUID -eq 0 ]] || { echo "ERROR: run as root (sudo)" >&2; exit 1; }
 
 # Locate the newest python-build-standalone install_only asset for this version.
+# Use releases/latest + the assets endpoint (paged): the releases *list* endpoint
+# truncates each release's 800+ assets, which hides the build we need.
 VERRE="${PYVER//./\\.}"
+RE="^cpython-${VERRE}(\\.[0-9]+)?\\+.*${TRIPLE}-install_only\\.tar\\.gz$"
+REPO="astral-sh/python-build-standalone"
+AUTH=(); [ -n "${GITHUB_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 echo ">>> Locating python-build-standalone asset for $PYVER ($TRIPLE)..."
-URL=$(curl -fsSL "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=8" \
-  | jq -r --arg re "cpython-${VERRE}(\\.[0-9]+)?\\+.*${TRIPLE}-install_only\\.tar\\.gz$" \
-    '[.[].assets[].browser_download_url | select(test($re))] | first // empty')
+RID=$(curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/${REPO}/releases/latest" | jq -r '.id')
+[ -n "$RID" ] && [ "$RID" != "null" ] || { echo "ERROR: could not resolve latest release" >&2; exit 1; }
+URL=""; page=1
+while :; do
+  CHUNK=$(curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/${REPO}/releases/${RID}/assets?per_page=100&page=${page}")
+  CNT=$(echo "$CHUNK" | jq 'length')
+  [ "${CNT:-0}" -eq 0 ] && break
+  URL=$(echo "$CHUNK" | jq -r --arg re "$RE" '[.[] | select(.name|test($re)) | .browser_download_url] | first // empty')
+  [ -n "$URL" ] && break
+  [ "$CNT" -lt 100 ] && break
+  page=$((page+1))
+done
 [ -n "$URL" ] || { echo "ERROR: no install_only asset found for cpython-$PYVER $TRIPLE" >&2; exit 1; }
 
 FULL=$(echo "$URL" | grep -oE 'cpython-[0-9]+\.[0-9]+\.[0-9]+' | head -1 | sed 's/cpython-//')
