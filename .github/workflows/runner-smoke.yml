@@ -1,0 +1,29 @@
+name: Runner Smoke Test
+
+# Manual sanity check that a self-hosted runner picks up a job and has its toolchain.
+# Run: Actions -> Runner Smoke Test -> Run workflow (or `gh workflow run`).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Report environment
+        run: |
+          echo "Runner host : $(hostname)"
+          echo "Run as user : $(whoami)"
+          echo "Node        : $(node -v)"
+          echo "Docker      : $(docker --version)"
+      - name: Verify Docker access (runner in docker group)
+        run: docker ps >/dev/null && echo "docker OK"
+      - name: Verify Playwright Chromium present
+        run: |
+          ls ~/.cache/ms-playwright/chromium-* >/dev/null 2>&1 \
+            && echo "playwright chromium present" \
+            || echo "playwright chromium not found (ok for non-E2E CI)"
