@@ -85,6 +85,13 @@ else
   echo "WARN: Playwright system deps unavailable (unsupported distro?) — skipping; install later if needed"
 fi
 
+# ── Shared hosted tool cache ──────────────────────────────────────────────
+# actions/setup-* read RUNNER_TOOL_CACHE (set from AGENT_TOOLSDIRECTORY by each
+# runner's .env). Pre-seed toolchains here with seed-python-toolcache.sh so they
+# work on hosts GitHub's manifest doesn't support (non-LTS Ubuntu).
+echo ">>> Creating shared hosted tool cache (/opt/hostedtoolcache)..."
+install -d -o "${RUNNER_USER}" -g "${RUNNER_USER}" /opt/hostedtoolcache
+
 echo ""
 echo "=== Host bootstrap complete ==="
 echo "Installed:"

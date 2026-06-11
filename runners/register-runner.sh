@@ -105,6 +105,17 @@ su - "${RUNNER_USER}" -c "cd '${RUNNER_DIR}' && ./config.sh \
   --unattended \
   --replace"
 
+# ── Point runner at the shared hosted tool cache ──────────────────────────
+# So toolchains pre-seeded with seed-python-toolcache.sh (and friends) are
+# visible to actions/setup-* — essential on hosts GitHub's manifest doesn't
+# support (non-LTS Ubuntu). The runner loads KEY=VALUE pairs from its .env.
+TOOLCACHE_DIR="/opt/hostedtoolcache"
+install -d -o "${RUNNER_USER}" -g "${RUNNER_USER}" "${TOOLCACHE_DIR}"
+ENV_FILE="${RUNNER_DIR}/.env"
+grep -q '^AGENT_TOOLSDIRECTORY=' "${ENV_FILE}" 2>/dev/null \
+  || echo "AGENT_TOOLSDIRECTORY=${TOOLCACHE_DIR}" >> "${ENV_FILE}"
+chown "${RUNNER_USER}:${RUNNER_USER}" "${ENV_FILE}" 2>/dev/null || true
+
 # ── Install + start systemd service ───────────────────────────────────────
 echo ">>> Installing systemd service..."
 cd "${RUNNER_DIR}"
