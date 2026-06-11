@@ -1,0 +1,106 @@
+name: Restart Self-Hosted Runner
+
+# Parameterized restart — targets any runner by its systemd unit name (from
+# fleet/inventory.yml) on the fleet host. Generalized from Weapons_Lore
+# runner-restart.yml (WEAP-464), which hardcoded a single unit name.
+#
+# Required secrets (the primary fleet host):
+#   - DEVOPS_VPS_HOST, DEVOPS_VPS_USERNAME, DEVOPS_VPS_SSH_KEY
+#   - RUNNER_HEALTH_PAT (admin scope on the org + personal repos, for the verify step)
+#   - SLACK_WEBHOOK_URL (optional, success notification)
+#
+# Multi-host note: selecting a secret set dynamically per host is not supported by
+# GitHub Actions. Additional hosts need their own secret set + a small matrix edit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_name:
+        description: 'Runner name (as shown in Settings -> Actions -> Runners)'
+        required: true
+        type: string
+      systemd_unit:
+        description: 'systemd unit, e.g. actions.runner.Echo8Lore.org-runner-01.service'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      runner_name:
+        required: true
+        type: string
+      systemd_unit:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  restart-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Restart runner service via SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
+        env:
+          UNIT: ${{ inputs.systemd_unit }}
+        with:
+          host: ${{ secrets.DEVOPS_VPS_HOST }}
+          username: ${{ secrets.DEVOPS_VPS_USERNAME }}
+          key: ${{ secrets.DEVOPS_VPS_SSH_KEY }}
+          envs: UNIT
+          script: |
+            echo "=== Runner service status (before) ==="
+            sudo systemctl status "$UNIT" --no-pager || true
+
+            echo ""
+            echo "=== Restarting $UNIT ==="
+            # KillMode=process can orphan Runner.Listener children on restart.
+            # Kill the whole cgroup, then start fresh.
+            sudo systemctl kill --kill-who=all --signal=SIGTERM "$UNIT" || true
+            sleep 2
+            # Bracket class [R] prevents pkill -f from matching its own cmdline.
+            sudo pkill -9 -f "[R]unner.Listener run" 2>/dev/null || true
+            sudo systemctl start "$UNIT"
+
+            echo ""
+            echo "=== Runner service status (after) ==="
+            sleep 5
+            sudo systemctl status "$UNIT" --no-pager
+
+      - name: Verify runner is online
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_HEALTH_PAT }}
+          RUNNER_NAME: ${{ inputs.runner_name }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::No RUNNER_HEALTH_PAT — cannot verify; restart command was sent."
+            exit 0
+          fi
+          sleep 10
+          for i in 1 2 3 4 5; do
+            # Search both org and repo runner lists for the name (scope-agnostic).
+            STATUS=$(gh api --paginate /orgs/${{ github.repository_owner }}/actions/runners \
+              --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | .status" 2>/dev/null || true)
+            if [ -z "$STATUS" ]; then
+              STATUS=$(gh api --paginate repos/${{ github.repository }}/actions/runners \
+                --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | .status" 2>/dev/null || true)
+            fi
+            if [ "$STATUS" = "online" ]; then
+              echo "Runner $RUNNER_NAME is back online."
+              exit 0
+            fi
+            echo "Attempt $i: $RUNNER_NAME status '${STATUS:-unknown}'. Retrying in 10s..."
+            sleep 10
+          done
+          echo "::warning::Runner $RUNNER_NAME not confirmed online after restart (may still be recovering)."
+
+      - name: Slack notification
+        if: success()
+        continue-on-error: true
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a  # v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "✅ Self-hosted runner `${{ inputs.runner_name }}` restarted and verified online."

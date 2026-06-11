@@ -1,0 +1,18 @@
+# fleet/inventory.yml is intentionally COMMITTED (no secrets, no IPs — addresses live
+# in GitHub secrets via ssh_secret_prefix). The health workflow reads it from the checkout.
+
+# Deploy configs may hold host IPs/keys — keep local.
+deploy/config.json
+deploy/config.*.json
+!deploy/config.example.json
+
+# SSH keys must never be committed.
+*.pem
+*.key
+id_*
+keys/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log

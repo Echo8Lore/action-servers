@@ -1,0 +1,58 @@
+{
+  "_comment": "Per-project deploy config. Copy to deploy/config.json (gitignored) and fill in. Used by deploy/deploy.sh. The reusable GitHub workflow takes the same values as workflow inputs/secrets instead of this file.",
+
+  "target": {
+    "ip": "15.204.92.213",
+    "domain": "myapp.example.com",
+    "ssh_port": 22
+  },
+
+  "users": {
+    "root": "ubuntu",
+    "service": "app_admin"
+  },
+
+  "keys": {
+    "root_private": "../keys/deploy_key",
+    "service_public_key_string": "ssh-ed25519 AAAA... you@example.com"
+  },
+
+  "app": {
+    "name": "MyApp",
+    "remote_path": "/opt/MyApp",
+    "compose_path": "docker-compose.yml",
+
+    "_comment_containers": "Container names to verify are running post-deploy. The first is treated as the primary app container (rebuilt/recreated). Add a proxy container if you run nginx/caddy in front.",
+    "containers": ["myapp_app"],
+    "proxy_container": "myapp_nginx",
+
+    "health": {
+      "path": "/api/health",
+      "expect": "\"status\":\"ok\""
+    },
+
+    "_comment_proxy": "Optional. If present, deploy.sh auto-selects an nginx config based on which certs exist on the host. Omit the whole block for projects without a reverse proxy.",
+    "proxy": {
+      "type": "nginx",
+      "config_dir": "infrastructure/nginx",
+      "config_target": "nginx_default.conf",
+      "configs": {
+        "letsencrypt": "nginx_prod.conf",
+        "selfsigned": "nginx_default.conf",
+        "http_only": "nginx_http_only.conf"
+      }
+    },
+
+    "_comment_db": "Optional. If present, deploy.sh/workflow backs up this file on the host before deploying and excludes it from the file sync. Forward-only — rollback is code-only.",
+    "db": {
+      "remote_file": "server/app.db",
+      "backup_dir": "backups",
+      "retain_days": 30
+    },
+
+    "_comment_hooks": "Optional post-deploy smoke check run inside the primary container. Skipped if absent.",
+    "hooks": {
+      "smoke": "node -e \"require('express');console.log('OK')\""
+    }
+  }
+}

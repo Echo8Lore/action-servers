@@ -1,0 +1,228 @@
+name: Runner Health Monitor
+
+# Monitors the WHOLE fleet across every scope listed in fleet/inventory.yml — runner
+# liveness (org + per-repo), host disk space, and stale in-progress jobs. Sends tiered
+# Slack alerts and auto-restarts offline runners by their systemd unit.
+#
+# Generalized from Weapons_Lore runner-health.yml (WEAP-396/464): the per-runner API
+# iteration is unchanged; the single repo scope is replaced by an inventory-driven loop
+# over org + repo scopes, and the hardcoded DevOpsRunner001 restart special-case is
+# replaced by a matrix derived from the inventory.
+#
+# Required secrets:
+#   - RUNNER_HEALTH_PAT  (admin scope on the org + personal repos — runner API)
+#   - DEVOPS_VPS_HOST / DEVOPS_VPS_USERNAME / DEVOPS_VPS_SSH_KEY  (disk check + restart)
+#   - SLACK_WEBHOOK_URL  (optional alerts)
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # hourly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  # ── Discover scopes + check liveness across all of them ──────────────────
+  check-runners:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      any_offline: ${{ steps.check.outputs.any_offline }}
+      offline_runners: ${{ steps.check.outputs.offline_runners }}
+      offline_detail: ${{ steps.check.outputs.offline_detail }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check all runners across inventory scopes
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_HEALTH_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::No RUNNER_HEALTH_PAT configured."
+            { echo 'any_offline=false'; echo 'offline_runners=[]'; echo 'offline_detail=[]'; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Inventory -> JSON (yq is preinstalled on ubuntu-latest).
+          INV=$(yq -o=json '.' fleet/inventory.yml)
+
+          # Distinct scopes to query, derived from the runners list.
+          SCOPES=$(echo "$INV" | jq -c '[.runners[] | {scope, target}] | unique')
+          echo "Scopes: $SCOPES"
+
+          ALL='[]'   # accumulated [{name,status,scope,target}]
+          for row in $(echo "$SCOPES" | jq -c '.[]'); do
+            SCOPE=$(echo "$row" | jq -r '.scope')
+            TARGET=$(echo "$row" | jq -r '.target')
+            if [ "$SCOPE" = "org" ]; then
+              API="orgs/${TARGET}/actions/runners"
+            else
+              API="repos/${TARGET}/actions/runners"
+            fi
+            RESP=$(gh api --paginate "$API" 2>/tmp/api-err || true)
+            if [ -z "$RESP" ]; then
+              echo "::warning::Could not query $API ($(cat /tmp/api-err 2>/dev/null | head -1))"
+              continue
+            fi
+            ROWS=$(echo "$RESP" | jq -c --arg s "$SCOPE" --arg t "$TARGET" \
+              '[.runners[] | {name, status, os, busy, scope:$s, target:$t}]')
+            ALL=$(jq -c -n --argjson a "$ALL" --argjson b "$ROWS" '$a + $b')
+          done
+
+          echo "=== Fleet runner status ==="
+          echo "$ALL" | jq -r '.[] | "  \(.name) [\(.scope):\(.target)]: \(.status)"'
+
+          OFFLINE_NAMES=$(echo "$ALL" | jq -c '[.[] | select(.status != "online") | .name]')
+          ANY=$(echo "$OFFLINE_NAMES" | jq 'length > 0')
+
+          # Join offline runners to their systemd_unit from inventory for restart.
+          DETAIL=$(echo "$INV" | jq -c --argjson off "$OFFLINE_NAMES" \
+            '[.runners[] | select(.name as $n | $off | index($n)) | {name, unit: .systemd_unit}]')
+
+          {
+            echo "any_offline=${ANY}"
+            echo "offline_runners=${OFFLINE_NAMES}"
+            echo "offline_detail=${DETAIL}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$ANY" = "true" ]; then
+            echo "::error::Offline runner(s): $(echo "$OFFLINE_NAMES" | jq -r 'join(", ")')"
+          fi
+
+  # ── Host disk check (primary host) ───────────────────────────────────────
+  check-disk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      disk_warning: ${{ steps.aggregate.outputs.disk_warning }}
+    steps:
+      - name: Check primary host disk
+        id: disk
+        continue-on-error: true
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
+        with:
+          host: ${{ secrets.DEVOPS_VPS_HOST }}
+          username: ${{ secrets.DEVOPS_VPS_USERNAME }}
+          key: ${{ secrets.DEVOPS_VPS_SSH_KEY }}
+          script: |
+            USAGE=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
+            echo "Host disk: ${USAGE}%"
+            [ "$USAGE" -ge 85 ] && { echo "THRESHOLD_EXCEEDED"; exit 1; } || true
+
+      - name: Aggregate
+        id: aggregate
+        run: |
+          if [ "${{ steps.disk.outcome }}" = "failure" ]; then
+            echo "disk_warning=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Disk >=85% on primary host (or SSH unreachable)."
+          else
+            echo "disk_warning=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Stale in-progress jobs (>60 min) across known repos ──────────────────
+  check-stale-jobs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      stale_count: ${{ steps.check.outputs.stale_count }}
+      stale_summary: ${{ steps.check.outputs.stale_summary }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Detect stale runs
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_HEALTH_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            { echo 'stale_count=0'; echo 'stale_summary='; } >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          INV=$(yq -o=json '.' fleet/inventory.yml)
+          OWNER='${{ github.repository_owner }}'
+
+          # Repos to inspect: explicit repo-scope targets + all repos in any org scope.
+          REPOS=$(echo "$INV" | jq -r '[.runners[] | select(.scope=="repo") | .target] | unique[]')
+          ORGS=$(echo "$INV" | jq -r '[.runners[] | select(.scope=="org") | .target] | unique[]')
+          for org in $ORGS; do
+            MORE=$(gh api --paginate "orgs/${org}/repos" --jq '.[].full_name' 2>/dev/null || true)
+            REPOS=$(printf "%s\n%s" "$REPOS" "$MORE")
+          done
+          REPOS=$(echo "$REPOS" | sort -u | sed '/^$/d')
+
+          THRESHOLD=$(date -u -d '60 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          STALE='[]'
+          for repo in $REPOS; do
+            RAW=$(mktemp)
+            if gh api "repos/${repo}/actions/runs?status=in_progress&per_page=100" > "$RAW" 2>/dev/null; then
+              ITEMS=$(jq -c --arg th "$THRESHOLD" --arg r "$repo" \
+                '[.workflow_runs[] | select(.created_at < $th) | {repo:$r, name, created_at, html_url}]' "$RAW" 2>/dev/null || echo '[]')
+              STALE=$(jq -c -n --argjson a "$STALE" --argjson b "$ITEMS" '$a + $b')
+            fi
+            rm -f "$RAW"
+          done
+
+          COUNT=$(echo "$STALE" | jq 'length')
+          echo "stale_count=${COUNT}" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" -gt 0 ]; then
+            SUMMARY=$(echo "$STALE" | jq -r '[.[0:5][] | "  - \(.repo): \(.name) — started \(.created_at)"] | join("\\n")')
+            echo "stale_summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
+            echo "::warning::${COUNT} stale run(s) >60min"
+          else
+            echo "stale_summary=" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Tiered Slack alert ───────────────────────────────────────────────────
+  alert:
+    needs: [check-runners, check-disk, check-stale-jobs]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Build and send alert
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANY_OFFLINE: ${{ needs.check-runners.outputs.any_offline }}
+          OFFLINE_RUNNERS: ${{ needs.check-runners.outputs.offline_runners }}
+          DISK_WARNING: ${{ needs.check-disk.outputs.disk_warning }}
+          STALE_COUNT: ${{ needs.check-stale-jobs.outputs.stale_count }}
+          STALE_SUMMARY: ${{ needs.check-stale-jobs.outputs.stale_summary }}
+        run: |
+          MESSAGE=""
+          if [ "$ANY_OFFLINE" = "true" ]; then
+            LIST=$(echo "$OFFLINE_RUNNERS" | jq -r 'join(", ")' 2>/dev/null || echo "$OFFLINE_RUNNERS")
+            MESSAGE="${MESSAGE}:red_circle: *CRITICAL — Runner(s) OFFLINE:* ${LIST}\nAuto-restart firing.\n\n"
+          fi
+          if [ "$DISK_WARNING" = "true" ]; then
+            MESSAGE="${MESSAGE}:warning: *WARNING — Disk >=85%* on primary host\n\n"
+          fi
+          if [ -n "$STALE_COUNT" ] && [ "$STALE_COUNT" != "0" ]; then
+            MESSAGE="${MESSAGE}:warning: *WARNING — ${STALE_COUNT} stale run(s) (>60min):*\n${STALE_SUMMARY}\n\n"
+          fi
+          if [ -z "$MESSAGE" ]; then
+            echo "All checks passed — fleet healthy."; exit 0
+          fi
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "::warning::No SLACK_WEBHOOK_URL — cannot send alert"; exit 0
+          fi
+          FULL="*Runner Health Monitor*\n\n${MESSAGE}"
+          JSON_MSG=$(printf '%b' "$FULL" | jq -Rs '.')
+          curl -sf -X POST "$SLACK_WEBHOOK" -H 'Content-Type: application/json' \
+            -d "{\"text\": ${JSON_MSG}}" || echo "::warning::Slack notification failed"
+
+  # ── Auto-restart each offline runner by its systemd unit ─────────────────
+  auto-restart:
+    needs: check-runners
+    if: always() && needs.check-runners.outputs.any_offline == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJson(needs.check-runners.outputs.offline_detail) }}
+    uses: ./.github/workflows/runner-restart.yml
+    with:
+      runner_name: ${{ matrix.runner.name }}
+      systemd_unit: ${{ matrix.runner.unit }}
+    secrets: inherit

@@ -1,0 +1,181 @@
+name: Reusable Deploy
+
+# Reusable deploy workflow — any project calls this with `uses:` to ship to its VPS.
+# Generalized from Weapons_Lore deploy-production.yml: app dir, container/service
+# names, health endpoint, compose path, and DB-backup are inputs; the Jira-promote job
+# is dropped. Runs on the calling project's own self-hosted runner by default.
+#
+# Caller example (project/.github/workflows/deploy.yml):
+#   jobs:
+#     deploy:
+#       uses: <you>/action-servers/.github/workflows/deploy.yml@v1
+#       with:
+#         app_dir: /opt/MyApp
+#         app_container: myapp_app
+#         proxy_container: myapp_nginx
+#         health_path: /api/health
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:        { type: string, default: 'self-hosted' }
+      app_dir:        { type: string, required: true }      # e.g. /opt/MyApp
+      compose_path:   { type: string, default: 'docker-compose.yml' }
+      compose_service:{ type: string, default: 'app' }       # service rebuilt/recreated
+      proxy_service:  { type: string, default: '' }          # e.g. nginx; empty = none
+      app_container:  { type: string, required: true }       # container name to verify
+      proxy_container:{ type: string, default: '' }          # container name to verify (optional)
+      health_path:    { type: string, default: '/api/health' }
+      health_ok:      { type: string, default: '"status":"ok"' }
+      db_remote_file: { type: string, default: '' }          # relative to app_dir; '' = skip backup
+      db_backup_dir:  { type: string, default: 'backups' }
+      db_retain_days: { type: number, default: 30 }
+      ref:            { type: string, default: '' }          # checkout ref; '' = triggering ref
+    secrets:
+      VPS_SSH_KEY:       { required: true }
+      VPS_HOST:          { required: true }
+      VPS_USERNAME:      { required: true }
+      PRODUCTION_URL:    { required: false }                 # health-check base URL
+      DEPLOY_ENV_JSON:   { required: false }                 # JSON object -> .env on first deploy
+      SLACK_WEBHOOK_URL: { required: false }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.app_dir }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Docker cache cleanup
+        env: { VPS_HOST: ${{ secrets.VPS_HOST }}, VPS_USERNAME: ${{ secrets.VPS_USERNAME }} }
+        run: |
+          T=${VPS_USERNAME}@${VPS_HOST}
+          ssh "$T" "sudo docker builder prune --keep-storage 5368709120 -f" 2>/dev/null || true
+          ssh "$T" "sudo docker image prune -a --filter 'until=168h' -f" 2>/dev/null || true
+
+      - name: Pre-deploy DB backup
+        if: inputs.db_remote_file != ''
+        env: { VPS_HOST: ${{ secrets.VPS_HOST }}, VPS_USERNAME: ${{ secrets.VPS_USERNAME }} }
+        run: |
+          T=${VPS_USERNAME}@${VPS_HOST}
+          ssh "$T" "
+            DB='${{ inputs.app_dir }}/${{ inputs.db_remote_file }}'
+            BK='${{ inputs.app_dir }}/${{ inputs.db_backup_dir }}'
+            if [ -f \"\$DB\" ]; then
+              mkdir -p \"\$BK\"; STAMP=\$(date +%Y%m%d_%H%M%S)
+              if command -v sqlite3 &>/dev/null; then sqlite3 \"\$DB\" \".backup '\$BK/backup_\${STAMP}.db'\";
+              else cp \"\$DB\" \"\$BK/backup_\${STAMP}.db\"; fi
+              find \"\$BK\" -name 'backup_*.db' -mtime +${{ inputs.db_retain_days }} -delete 2>/dev/null || true
+              echo 'Backup created.'
+            else echo 'No existing DB — first deploy.'; fi
+          "
+
+      - name: Deploy to VPS (near-zero-downtime)
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USERNAME: ${{ secrets.VPS_USERNAME }}
+          DEPLOY_ENV_JSON: ${{ secrets.DEPLOY_ENV_JSON }}
+        run: |
+          set -e
+          APP_DIR='${{ inputs.app_dir }}'
+          SVC='${{ inputs.compose_service }}'
+          PROXY_SVC='${{ inputs.proxy_service }}'
+          APP_C='${{ inputs.app_container }}'
+          DB_REL='${{ inputs.db_remote_file }}'
+          T=${VPS_USERNAME}@${VPS_HOST}
+          TEMP=/home/${VPS_USERNAME}/app_temp
+
+          ssh "$T" "mkdir -p ${TEMP}"
+          # Sync working tree (exclude heavy/local artifacts and the live DB).
+          EXCLUDES="--exclude node_modules --exclude .git --exclude '*.db' --exclude _qa --exclude test-results --exclude playwright-report"
+          rsync -avz --delete $EXCLUDES ./ "${T}:${TEMP}/"
+
+          # Build the remote deploy script. DB file (if any) is preserved in place.
+          DB_EXCLUDE=""
+          [ -n "$DB_REL" ] && DB_EXCLUDE="--exclude '${DB_REL}'"
+          ENV_WRITE=""
+          if [ -n "${DEPLOY_ENV_JSON:-}" ]; then
+            # Write .env from JSON only if it doesn't already exist on the host.
+            ENV_KV=$(printf '%s' "$DEPLOY_ENV_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
+            ENV_WRITE="if [ ! -f .env ]; then cat > .env <<'DOTENV'
+${ENV_KV}
+DOTENV
+chmod 600 .env; fi"
+          fi
+
+          ssh "$T" bash -s <<REMOTE
+          set -e
+          sudo rsync -av ${DB_EXCLUDE} ${TEMP}/ ${APP_DIR}/
+          sudo chown -R ${VPS_USERNAME}:${VPS_USERNAME} ${APP_DIR}
+          cd ${APP_DIR}
+          ${ENV_WRITE}
+          sudo docker tag ${APP_C}:latest ${APP_C}:rollback 2>/dev/null || true
+          sudo docker compose -f '${{ inputs.compose_path }}' build ${SVC}
+          if [ -n "${PROXY_SVC}" ]; then sudo docker compose -f '${{ inputs.compose_path }}' up -d ${PROXY_SVC}; fi
+          sudo docker compose -f '${{ inputs.compose_path }}' up -d --no-deps --force-recreate ${SVC}
+          rm -rf ${TEMP}
+          REMOTE
+
+      - name: Verify containers running
+        env: { VPS_HOST: ${{ secrets.VPS_HOST }}, VPS_USERNAME: ${{ secrets.VPS_USERNAME }} }
+        run: |
+          T=${VPS_USERNAME}@${VPS_HOST}
+          sleep 10
+          app=$(ssh "$T" "docker ps -q -f name=${{ inputs.app_container }} -f status=running")
+          if [ -z "$app" ]; then
+            echo "::error::App container '${{ inputs.app_container }}' not running."
+            ssh "$T" "docker ps -a"; exit 1
+          fi
+          if [ -n "${{ inputs.proxy_container }}" ]; then
+            proxy=$(ssh "$T" "docker ps -q -f name=${{ inputs.proxy_container }} -f status=running")
+            [ -z "$proxy" ] && { echo "::error::Proxy container not running."; ssh "$T" "docker ps -a"; exit 1; }
+          fi
+          echo "Container(s) running."
+
+      - name: Health check
+        env:
+          PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          BASE="${PRODUCTION_URL:-http://${VPS_HOST}}"
+          URL="${BASE%/}${{ inputs.health_path }}"
+          if curl -Lsfk --max-time 10 "$URL" | grep -q '${{ inputs.health_ok }}'; then
+            echo "Health check passed: $URL"
+          else
+            echo "::error::Health check failed: $URL"; exit 1
+          fi
+
+  notify:
+    needs: deploy
+    if: always() && (success() || failure())
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack notify
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        continue-on-error: true
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a  # v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "${{ needs.deploy.result == 'success' && '✅ Deploy succeeded' || '🔴 DEPLOY FAILED' }} — ${{ github.repository }}@${{ github.sha }}\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

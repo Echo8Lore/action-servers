@@ -1,0 +1,30 @@
+# Fleet inventory — the source of truth for the runner health monitor.
+#
+# Copy to fleet/inventory.yml and COMMIT it. It deliberately contains NO secrets and
+# NO host IP addresses, so it is safe in a public repo and the health workflow can read
+# it from the checkout. Host addresses + SSH keys live in GitHub secrets, selected by
+# each host's `ssh_secret_prefix` (e.g. prefix "DEVOPS" -> secrets DEVOPS_VPS_HOST,
+# DEVOPS_VPS_USERNAME, DEVOPS_VPS_SSH_KEY).
+#
+# Keep this current as you register / remove runners. Each runner entry maps 1:1 to a
+# register-runner.sh invocation; copy the `systemd_unit` it prints.
+
+hosts:
+  - id: devops-vps
+    ssh_secret_prefix: DEVOPS     # -> DEVOPS_VPS_HOST / _USERNAME / _SSH_KEY secrets
+    disk_threshold: 85            # percent; monitor warns above this
+
+runners:
+  - name: org-runner-01
+    host: devops-vps
+    scope: org                    # org | repo
+    target: Echo8Lore             # owner (org scope) or owner/repo (repo scope)
+    labels: [self-hosted, Linux, X64]
+    systemd_unit: actions.runner.Echo8Lore.org-runner-01.service
+
+  - name: personal-myapp-01
+    host: devops-vps
+    scope: repo
+    target: your-handle/my-app    # replace your-handle
+    labels: [self-hosted, Linux, X64, my-app]
+    systemd_unit: actions.runner.your-handle-my-app.personal-myapp-01.service
