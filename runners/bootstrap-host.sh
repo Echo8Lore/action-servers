@@ -71,14 +71,19 @@ if ! id "${RUNNER_USER}" &>/dev/null; then
 fi
 usermod -aG docker "${RUNNER_USER}"
 
-# ── Playwright system deps + Chromium ─────────────────────────────────────
+# ── Playwright system deps + Chromium (best-effort) ───────────────────────
 # Installed at the host level so any project's runner can run browser tests
 # without re-installing system libraries each job. Per-project Playwright npm
 # versions are still resolved from each repo's lockfile at job time.
-echo ">>> Installing Playwright system dependencies + Chromium..."
-su - "${RUNNER_USER}" -c "npx --yes playwright install-deps chromium" || \
-  npx --yes playwright install-deps chromium
-su - "${RUNNER_USER}" -c "npx --yes playwright install chromium"
+# Non-fatal: a runner host without browsers is still useful for non-E2E CI, and
+# install-deps can lag new Ubuntu releases — don't block bootstrap on it.
+echo ">>> Installing Playwright system dependencies + Chromium (best-effort)..."
+if npx --yes playwright install-deps chromium; then
+  su - "${RUNNER_USER}" -c "npx --yes playwright install chromium" \
+    || echo "WARN: Playwright browser download failed — install later if a project needs browsers"
+else
+  echo "WARN: Playwright system deps unavailable (unsupported distro?) — skipping; install later if needed"
+fi
 
 echo ""
 echo "=== Host bootstrap complete ==="
