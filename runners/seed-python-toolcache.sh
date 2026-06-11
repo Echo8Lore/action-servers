@@ -25,6 +25,11 @@ TRIPLE="x86_64-unknown-linux-gnu"
 
 [[ $EUID -eq 0 ]] || { echo "ERROR: run as root (sudo)" >&2; exit 1; }
 
+# The cache root MUST be owned by the runner user: actions/setup-* create
+# subdirs (e.g. node/) here at job time as the unprivileged runner. If a root-
+# owned `mkdir -p` creates it first, every setup-* job fails with EACCES.
+id "$RUNNER_USER" &>/dev/null && install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "$TOOLCACHE"
+
 # Locate the newest python-build-standalone install_only asset for this version.
 # Use releases/latest + the assets endpoint (paged): the releases *list* endpoint
 # truncates each release's 800+ assets, which hides the build we need.
