@@ -1,0 +1,16 @@
+# Fleet inventory — source of truth for the runner health monitor.
+# No secrets / no IPs (host addresses live in GitHub secrets via ssh_secret_prefix).
+# Keep current as runners are registered / removed.
+
+hosts:
+  - id: ovh-staging            # OVH box 15.204.92.213 (vps-8832134f); also hosts the
+    ssh_secret_prefix: DEVOPS  # Weapons_Lore staging runner. -> DEVOPS_VPS_HOST/_USERNAME/_SSH_KEY
+    disk_threshold: 85
+
+runners:
+  - name: org-runner-01
+    host: ovh-staging
+    scope: org
+    target: Echo8Lore
+    labels: [self-hosted, Linux, X64]
+    systemd_unit: actions.runner.Echo8Lore.org-runner-01.service
