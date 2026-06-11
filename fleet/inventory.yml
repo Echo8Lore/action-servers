@@ -14,3 +14,10 @@ runners:
     target: Echo8Lore
     labels: [self-hosted, Linux, X64]
     systemd_unit: actions.runner.Echo8Lore.org-runner-01.service
+
+  - name: personal-fieldkit-01
+    host: ovh-staging
+    scope: repo
+    target: ResearchMonkey/FieldKit
+    labels: [self-hosted, Linux, X64, fieldkit]
+    systemd_unit: actions.runner.ResearchMonkey-FieldKit.personal-fieldkit-01.service
