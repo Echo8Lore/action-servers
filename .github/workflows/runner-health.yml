@@ -11,7 +11,8 @@ name: Runner Health Monitor
 #
 # Required secrets:
 #   - RUNNER_HEALTH_PAT  (admin scope on the org + personal repos — runner API)
-#   - DEVOPS_VPS_HOST / DEVOPS_VPS_USERNAME / DEVOPS_VPS_SSH_KEY  (disk check + restart)
+#   - <PREFIX>_VPS_HOST / _VPS_USERNAME / _VPS_SSH_KEY per host, where PREFIX is the
+#     host's ssh_secret_prefix in fleet/inventory.yml  (disk check + restart)
 #   - SLACK_WEBHOOK_URL  (optional alerts)
 
 on:
@@ -24,6 +25,18 @@ permissions:
   actions: write
 
 jobs:
+  # ── Hosts list for the per-host disk check ───────────────────────────────
+  load-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      hosts: ${{ steps.hosts.outputs.hosts }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read hosts
+        id: hosts
+        run: echo "hosts=$(yq -o=json -I=0 '.hosts' fleet/inventory.yml)" >> "$GITHUB_OUTPUT"
+
   # ── Discover scopes + check liveness across all of them ──────────────────
   check-runners:
     runs-on: ubuntu-latest
@@ -79,9 +92,11 @@ jobs:
           OFFLINE_NAMES=$(echo "$ALL" | jq -c '[.[] | select(.status != "online") | .name]')
           ANY=$(echo "$OFFLINE_NAMES" | jq 'length > 0')
 
-          # Join offline runners to their systemd_unit from inventory for restart.
+          # Join offline runners to their systemd_unit + host secret prefix for restart.
           DETAIL=$(echo "$INV" | jq -c --argjson off "$OFFLINE_NAMES" \
-            '[.runners[] | select(.name as $n | $off | index($n)) | {name, unit: .systemd_unit}]')
+            '(.hosts | map({(.id): .ssh_secret_prefix}) | add) as $pfx
+             | [.runners[] | select(.name as $n | $off | index($n))
+                | {name, unit: .systemd_unit, prefix: $pfx[.host]}]')
 
           {
             echo "any_offline=${ANY}"
@@ -93,35 +108,32 @@ jobs:
             echo "::error::Offline runner(s): $(echo "$OFFLINE_NAMES" | jq -r 'join(", ")')"
           fi
 
-  # ── Host disk check (primary host) ───────────────────────────────────────
+  # ── Host disk check (every inventory host) ───────────────────────────────
+  # A failing leg (disk over threshold or SSH unreachable) fails this job; the
+  # alert job reads needs.check-disk.result.
   check-disk:
+    needs: load-inventory
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    outputs:
-      disk_warning: ${{ steps.aggregate.outputs.disk_warning }}
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJson(needs.load-inventory.outputs.hosts) }}
+    name: check-disk (${{ matrix.host.id }})
     steps:
-      - name: Check primary host disk
-        id: disk
-        continue-on-error: true
+      - name: Check ${{ matrix.host.id }} disk
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
+        env:
+          THRESHOLD: ${{ matrix.host.disk_threshold || 85 }}
         with:
-          host: ${{ secrets.DEVOPS_VPS_HOST }}
-          username: ${{ secrets.DEVOPS_VPS_USERNAME }}
-          key: ${{ secrets.DEVOPS_VPS_SSH_KEY }}
+          host: ${{ secrets[format('{0}_VPS_HOST', matrix.host.ssh_secret_prefix)] }}
+          username: ${{ secrets[format('{0}_VPS_USERNAME', matrix.host.ssh_secret_prefix)] }}
+          key: ${{ secrets[format('{0}_VPS_SSH_KEY', matrix.host.ssh_secret_prefix)] }}
+          envs: THRESHOLD
           script: |
             USAGE=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
-            echo "Host disk: ${USAGE}%"
-            [ "$USAGE" -ge 85 ] && { echo "THRESHOLD_EXCEEDED"; exit 1; } || true
-
-      - name: Aggregate
-        id: aggregate
-        run: |
-          if [ "${{ steps.disk.outcome }}" = "failure" ]; then
-            echo "disk_warning=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::Disk >=85% on primary host (or SSH unreachable)."
-          else
-            echo "disk_warning=false" >> "$GITHUB_OUTPUT"
-          fi
+            echo "Host disk: ${USAGE}% (threshold ${THRESHOLD}%)"
+            [ "$USAGE" -ge "$THRESHOLD" ] && { echo "THRESHOLD_EXCEEDED"; exit 1; } || true
 
   # ── Stale in-progress jobs (>60 min) across known repos ──────────────────
   check-stale-jobs:
@@ -187,7 +199,7 @@ jobs:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
           ANY_OFFLINE: ${{ needs.check-runners.outputs.any_offline }}
           OFFLINE_RUNNERS: ${{ needs.check-runners.outputs.offline_runners }}
-          DISK_WARNING: ${{ needs.check-disk.outputs.disk_warning }}
+          DISK_WARNING: ${{ needs.check-disk.result == 'failure' }}
           STALE_COUNT: ${{ needs.check-stale-jobs.outputs.stale_count }}
           STALE_SUMMARY: ${{ needs.check-stale-jobs.outputs.stale_summary }}
         run: |
@@ -197,7 +209,7 @@ jobs:
             MESSAGE="${MESSAGE}:red_circle: *CRITICAL — Runner(s) OFFLINE:* ${LIST}\nAuto-restart firing.\n\n"
           fi
           if [ "$DISK_WARNING" = "true" ]; then
-            MESSAGE="${MESSAGE}:warning: *WARNING — Disk >=85%* on primary host\n\n"
+            MESSAGE="${MESSAGE}:warning: *WARNING — Disk over threshold (or SSH unreachable)* on a fleet host — see the check-disk legs of this run\n\n"
           fi
           if [ -n "$STALE_COUNT" ] && [ "$STALE_COUNT" != "0" ]; then
             MESSAGE="${MESSAGE}:warning: *WARNING — ${STALE_COUNT} stale run(s) (>60min):*\n${STALE_SUMMARY}\n\n"
@@ -225,4 +237,5 @@ jobs:
     with:
       runner_name: ${{ matrix.runner.name }}
       systemd_unit: ${{ matrix.runner.unit }}
+      ssh_secret_prefix: ${{ matrix.runner.prefix }}
     secrets: inherit

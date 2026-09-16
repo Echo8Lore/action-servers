@@ -1,10 +1,17 @@
 # Fleet inventory — source of truth for the runner health monitor.
 # No secrets / no IPs (host addresses live in GitHub secrets via ssh_secret_prefix).
 # Keep current as runners are registered / removed.
+#
+# Each host's ssh_secret_prefix selects the secret set the monitor/restart use:
+#   <PREFIX>_VPS_HOST / <PREFIX>_VPS_USERNAME / <PREFIX>_VPS_SSH_KEY
 
 hosts:
-  - id: ovh-staging            # OVH box 15.204.92.213 (vps-8832134f); also hosts the
-    ssh_secret_prefix: DEVOPS  # Weapons_Lore staging runner. -> DEVOPS_VPS_HOST/_USERNAME/_SSH_KEY
+  - id: ovh-staging            # OVH "DevOps_Server_002" (vps-8832134f); also hosts the
+    ssh_secret_prefix: DEVOPS  # Weapons_Lore staging-runner (monitored by that repo).
+    disk_threshold: 85
+
+  - id: ovh-devops-001         # OVH "DevOps_Server_001" (vps-f8fe5d07)
+    ssh_secret_prefix: DEVOPS001
     disk_threshold: 85
 
 runners:
@@ -14,6 +21,13 @@ runners:
     target: Echo8Lore
     labels: [self-hosted, Linux, X64]
     systemd_unit: actions.runner.Echo8Lore.org-runner-01.service
+
+  - name: org-runner-02
+    host: ovh-devops-001
+    scope: org
+    target: Echo8Lore
+    labels: [self-hosted, Linux, X64]
+    systemd_unit: actions.runner.Echo8Lore.org-runner-02.service
 
   - name: personal-fieldkit-01
     host: ovh-staging
