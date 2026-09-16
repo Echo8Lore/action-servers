@@ -85,8 +85,8 @@ Then confirm the runner that was holding it is online (restart if not).
   host — GitHub distributes jobs round-robin.
 - **A second host:** bootstrap it, register runners, add a `hosts:` entry to the
   inventory with its own `ssh_secret_prefix`, and add the matching `<PREFIX>_VPS_*`
-  secrets. (Per-host restart currently uses the `DEVOPS_*` set; a second host's restart
-  needs its own secret set wired into `runner-restart.yml`.)
+  secrets. The monitor's disk check and auto-restart pick each host's secret set from
+  its prefix automatically; manual restarts take it as the `ssh_secret_prefix` input.
 - **Cost note:** all CI on self-hosted runners ≈ the VPS bill only; GitHub-hosted
   minutes are spent solely by the monitor/restart jobs (`ubuntu-latest`), which are
   cheap and infrequent.

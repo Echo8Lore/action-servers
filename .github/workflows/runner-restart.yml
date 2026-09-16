@@ -4,13 +4,13 @@ name: Restart Self-Hosted Runner
 # fleet/inventory.yml) on the fleet host. Generalized from Weapons_Lore
 # runner-restart.yml (WEAP-464), which hardcoded a single unit name.
 #
-# Required secrets (the primary fleet host):
-#   - DEVOPS_VPS_HOST, DEVOPS_VPS_USERNAME, DEVOPS_VPS_SSH_KEY
+# Required secrets (per host, selected by the ssh_secret_prefix input):
+#   - <PREFIX>_VPS_HOST, <PREFIX>_VPS_USERNAME, <PREFIX>_VPS_SSH_KEY
 #   - RUNNER_HEALTH_PAT (admin scope on the org + personal repos, for the verify step)
 #   - SLACK_WEBHOOK_URL (optional, success notification)
 #
-# Multi-host note: selecting a secret set dynamically per host is not supported by
-# GitHub Actions. Additional hosts need their own secret set + a small matrix edit.
+# Multi-host: the host is chosen by ssh_secret_prefix (the host's value in
+# fleet/inventory.yml), resolved via secrets[format(...)].
 
 on:
   workflow_dispatch:
@@ -23,6 +23,11 @@ on:
         description: 'systemd unit, e.g. actions.runner.Echo8Lore.org-runner-01.service'
         required: true
         type: string
+      ssh_secret_prefix:
+        description: 'Host secret prefix from fleet/inventory.yml (DEVOPS = ovh-staging, DEVOPS001 = ovh-devops-001)'
+        required: false
+        default: DEVOPS
+        type: string
   workflow_call:
     inputs:
       runner_name:
@@ -30,6 +35,10 @@ on:
         type: string
       systemd_unit:
         required: true
+        type: string
+      ssh_secret_prefix:
+        required: false
+        default: DEVOPS
         type: string
 
 permissions:
@@ -45,9 +54,9 @@ jobs:
         env:
           UNIT: ${{ inputs.systemd_unit }}
         with:
-          host: ${{ secrets.DEVOPS_VPS_HOST }}
-          username: ${{ secrets.DEVOPS_VPS_USERNAME }}
-          key: ${{ secrets.DEVOPS_VPS_SSH_KEY }}
+          host: ${{ secrets[format('{0}_VPS_HOST', inputs.ssh_secret_prefix)] }}
+          username: ${{ secrets[format('{0}_VPS_USERNAME', inputs.ssh_secret_prefix)] }}
+          key: ${{ secrets[format('{0}_VPS_SSH_KEY', inputs.ssh_secret_prefix)] }}
           envs: UNIT
           script: |
             echo "=== Runner service status (before) ==="
@@ -59,8 +68,14 @@ jobs:
             # Kill the whole cgroup, then start fresh.
             sudo systemctl kill --kill-who=all --signal=SIGTERM "$UNIT" || true
             sleep 2
-            # Bracket class [R] prevents pkill -f from matching its own cmdline.
-            sudo pkill -9 -f "[R]unner.Listener run" 2>/dev/null || true
+            # Hosts run several runners: only kill this unit's leftover listener,
+            # matched by its install dir. Bracket class [R] prevents pkill -f from
+            # matching its own cmdline.
+            DIR=$(systemctl show -p WorkingDirectory --value "$UNIT")
+            case "$DIR" in
+              /?*) sudo pkill -9 -f "${DIR}/bin/[R]unner.Listener" 2>/dev/null || true ;;
+              *)   echo "WARN: no WorkingDirectory for $UNIT; skipping orphan sweep" ;;
+            esac
             sudo systemctl start "$UNIT"
 
             echo ""
