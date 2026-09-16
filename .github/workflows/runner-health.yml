@@ -96,7 +96,9 @@ jobs:
           DETAIL=$(echo "$INV" | jq -c --argjson off "$OFFLINE_NAMES" \
             '(.hosts | map({(.id): .ssh_secret_prefix}) | add) as $pfx
              | [.runners[] | select(.name as $n | $off | index($n))
-                | {name, unit: .systemd_unit, prefix: $pfx[.host]}]')
+                | {name, unit: .systemd_unit, prefix: $pfx[.host],
+                   api: (if .scope == "org" then "orgs/\(.target)/actions/runners"
+                         else "repos/\(.target)/actions/runners" end)}]')
 
           {
             echo "any_offline=${ANY}"
@@ -238,4 +240,5 @@ jobs:
       runner_name: ${{ matrix.runner.name }}
       systemd_unit: ${{ matrix.runner.unit }}
       ssh_secret_prefix: ${{ matrix.runner.prefix }}
+      runners_api: ${{ matrix.runner.api }}
     secrets: inherit

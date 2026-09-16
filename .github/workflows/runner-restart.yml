@@ -28,6 +28,11 @@ on:
         required: false
         default: DEVOPS
         type: string
+      runners_api:
+        description: 'Runner list API for the verify step, e.g. repos/<owner>/<repo>/actions/runners (default: this org)'
+        required: false
+        default: ''
+        type: string
   workflow_call:
     inputs:
       runner_name:
@@ -39,6 +44,10 @@ on:
       ssh_secret_prefix:
         required: false
         default: DEVOPS
+        type: string
+      runners_api:
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -86,7 +95,9 @@ jobs:
       - name: Verify runner is online
         env:
           GH_TOKEN: ${{ secrets.RUNNER_HEALTH_PAT }}
-          RUNNER_NAME: ${{ inputs.runner_name }}
+          # Not RUNNER_NAME: the job's own runner sets that variable and it wins.
+          TARGET_RUNNER: ${{ inputs.runner_name }}
+          RUNNERS_API: ${{ inputs.runners_api || format('orgs/{0}/actions/runners', github.repository_owner) }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "::warning::No RUNNER_HEALTH_PAT — cannot verify; restart command was sent."
@@ -94,21 +105,16 @@ jobs:
           fi
           sleep 10
           for i in 1 2 3 4 5; do
-            # Search both org and repo runner lists for the name (scope-agnostic).
-            STATUS=$(gh api --paginate /orgs/${{ github.repository_owner }}/actions/runners \
-              --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | .status" 2>/dev/null || true)
-            if [ -z "$STATUS" ]; then
-              STATUS=$(gh api --paginate repos/${{ github.repository }}/actions/runners \
-                --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | .status" 2>/dev/null || true)
-            fi
+            STATUS=$(gh api --paginate "$RUNNERS_API" \
+              --jq ".runners[] | select(.name == \"$TARGET_RUNNER\") | .status" 2>/dev/null || true)
             if [ "$STATUS" = "online" ]; then
-              echo "Runner $RUNNER_NAME is back online."
+              echo "Runner $TARGET_RUNNER is back online."
               exit 0
             fi
-            echo "Attempt $i: $RUNNER_NAME status '${STATUS:-unknown}'. Retrying in 10s..."
+            echo "Attempt $i: $TARGET_RUNNER status '${STATUS:-unknown}'. Retrying in 10s..."
             sleep 10
           done
-          echo "::warning::Runner $RUNNER_NAME not confirmed online after restart (may still be recovering)."
+          echo "::warning::Runner $TARGET_RUNNER not confirmed online after restart (may still be recovering)."
 
       - name: Slack notification
         if: success()
