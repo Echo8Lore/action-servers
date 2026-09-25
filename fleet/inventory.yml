@@ -6,22 +6,16 @@
 #   <PREFIX>_VPS_HOST / <PREFIX>_VPS_USERNAME / <PREFIX>_VPS_SSH_KEY
 
 hosts:
-  - id: ovh-staging            # OVH "DevOps_Server_002" (vps-8832134f); also hosts the
-    ssh_secret_prefix: DEVOPS  # Weapons_Lore staging-runner (monitored by that repo).
+  - id: ovh-staging            # OVH "DevOps_Server_002" (vps-8832134f); also hosts
+    ssh_secret_prefix: DEVOPS  # vps-ci-runner-01 (Weapons_Lore) and wh40k-runner-01
+                               # (warhammer-40k-database); neither is tracked here.
     disk_threshold: 85
 
-  - id: ovh-devops-001         # OVH "DevOps_Server_001" (vps-f8fe5d07)
+  - id: ovh-devops-001         # OVH vps-f8fe5d07, now "WebHosting_Server_001" (staging web host)
     ssh_secret_prefix: DEVOPS001
     disk_threshold: 85
 
 runners:
-  - name: org-runner-01
-    host: ovh-staging
-    scope: org
-    target: Echo8Lore
-    labels: [self-hosted, Linux, X64]
-    systemd_unit: actions.runner.Echo8Lore.org-runner-01.service
-
   - name: org-runner-02
     host: ovh-devops-001
     scope: org
