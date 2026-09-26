@@ -2,7 +2,8 @@ name: Runner Health Monitor
 
 # Monitors the WHOLE fleet across every scope listed in fleet/inventory.yml — runner
 # liveness (org + per-repo), host disk space, and stale in-progress jobs. Sends tiered
-# Slack alerts and auto-restarts offline runners by their systemd unit.
+# Telegram alerts (Hermes's bot, via ops/notify-telegram.sh) and auto-restarts offline
+# runners by their systemd unit.
 #
 # Generalized from Weapons_Lore runner-health.yml (WEAP-396/464): the per-runner API
 # iteration is unchanged; the single repo scope is replaced by an inventory-driven loop
@@ -13,12 +14,22 @@ name: Runner Health Monitor
 #   - RUNNER_HEALTH_PAT  (admin scope on the org + personal repos — runner API)
 #   - <PREFIX>_VPS_HOST / _VPS_USERNAME / _VPS_SSH_KEY per host, where PREFIX is the
 #     host's ssh_secret_prefix in fleet/inventory.yml  (disk check + restart)
-#   - SLACK_WEBHOOK_URL  (optional alerts)
+#   - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  (alerts; if either is empty the monitor
+#     still runs and warns that it cannot alert)
+#
+# Prove the alert path end to end without an outage: Run workflow with test_alert
+# checked. It sends one "[test]" message even when the fleet is healthy, and FAILS the
+# alert job if Telegram does not accept it.
 
 on:
   schedule:
     - cron: '0 * * * *'   # hourly
   workflow_dispatch:
+    inputs:
+      test_alert:
+        description: 'Also send a "[test]" Telegram message to prove the alert path'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -189,43 +200,63 @@ jobs:
             echo "stale_summary=" >> "$GITHUB_OUTPUT"
           fi
 
-  # ── Tiered Slack alert ───────────────────────────────────────────────────
+  # ── Tiered Telegram alert ────────────────────────────────────────────────
+  # A real alert that cannot be delivered (secrets missing, or Telegram refuses it)
+  # WARNS and exits 0: the checks above already ran and their results are in this run,
+  # and a red alert job would not reach anyone either. The test_alert path is the
+  # opposite: its whole purpose is to prove delivery, so it fails when delivery fails.
   alert:
     needs: [check-runners, check-disk, check-stale-jobs]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
+      - uses: actions/checkout@v5
+
       - name: Build and send alert
         env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_ALERT: ${{ github.event_name == 'workflow_dispatch' && inputs.test_alert }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ANY_OFFLINE: ${{ needs.check-runners.outputs.any_offline }}
           OFFLINE_RUNNERS: ${{ needs.check-runners.outputs.offline_runners }}
           DISK_WARNING: ${{ needs.check-disk.result == 'failure' }}
           STALE_COUNT: ${{ needs.check-stale-jobs.outputs.stale_count }}
           STALE_SUMMARY: ${{ needs.check-stale-jobs.outputs.stale_summary }}
         run: |
+          # Plain text. The facts are runner names, counts and workflow run names --
+          # no host addresses -- so the text is safe to echo into this public log.
           MESSAGE=""
           if [ "$ANY_OFFLINE" = "true" ]; then
             LIST=$(echo "$OFFLINE_RUNNERS" | jq -r 'join(", ")' 2>/dev/null || echo "$OFFLINE_RUNNERS")
-            MESSAGE="${MESSAGE}:red_circle: *CRITICAL — Runner(s) OFFLINE:* ${LIST}\nAuto-restart firing.\n\n"
+            MESSAGE="${MESSAGE}CRITICAL - Runner(s) OFFLINE: ${LIST}\nAuto-restart firing.\n\n"
           fi
           if [ "$DISK_WARNING" = "true" ]; then
-            MESSAGE="${MESSAGE}:warning: *WARNING — Disk over threshold (or SSH unreachable)* on a fleet host — see the check-disk legs of this run\n\n"
+            MESSAGE="${MESSAGE}WARNING - Disk over threshold (or SSH unreachable) on a fleet host - see the check-disk legs of this run\n\n"
           fi
           if [ -n "$STALE_COUNT" ] && [ "$STALE_COUNT" != "0" ]; then
-            MESSAGE="${MESSAGE}:warning: *WARNING — ${STALE_COUNT} stale run(s) (>60min):*\n${STALE_SUMMARY}\n\n"
+            MESSAGE="${MESSAGE}WARNING - ${STALE_COUNT} stale run(s) (>60min):\n${STALE_SUMMARY}\n\n"
           fi
+
+          if [ "$TEST_ALERT" = "true" ]; then
+            rc=0
+            printf '[test] Runner Health Monitor alert path OK\n%s\n' "$RUN_URL" \
+              | bash ops/notify-telegram.sh || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::test_alert: Telegram did not accept the test message (exit ${rc})"
+              TEST_FAILED=1
+            fi
+          fi
+
           if [ -z "$MESSAGE" ]; then
-            echo "All checks passed — fleet healthy."; exit 0
+            echo "All checks passed - fleet healthy."
+          else
+            FULL="Runner Health Monitor\n\n${MESSAGE}${RUN_URL}"
+            printf '%b\n' "$FULL"
+            printf '%b\n' "$FULL" | bash ops/notify-telegram.sh || true   # warns on its own
           fi
-          if [ -z "$SLACK_WEBHOOK" ]; then
-            echo "::warning::No SLACK_WEBHOOK_URL — cannot send alert"; exit 0
-          fi
-          FULL="*Runner Health Monitor*\n\n${MESSAGE}"
-          JSON_MSG=$(printf '%b' "$FULL" | jq -Rs '.')
-          curl -sf -X POST "$SLACK_WEBHOOK" -H 'Content-Type: application/json' \
-            -d "{\"text\": ${JSON_MSG}}" || echo "::warning::Slack notification failed"
+          exit "${TEST_FAILED:-0}"
 
   # ── Auto-restart each offline runner by its systemd unit ─────────────────
   auto-restart:
