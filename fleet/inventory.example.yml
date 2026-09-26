@@ -14,6 +14,11 @@ hosts:
     ssh_secret_prefix: DEVOPS     # -> DEVOPS_VPS_HOST / _USERNAME / _SSH_KEY secrets
     disk_threshold: 85            # percent; monitor warns above this
 
+# Domains the fleet-inventory workflow resolves; each DNS record is matched to the
+# host whose addresses it points at (reported by host id, never by IP).
+domains:
+  - example.com
+
 runners:
   - name: org-runner-01
     host: devops-vps

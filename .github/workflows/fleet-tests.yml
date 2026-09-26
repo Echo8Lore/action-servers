@@ -1,0 +1,30 @@
+name: Fleet Tests
+
+# Unit tests for the fleet-inventory tooling (fleet/fleet_facts.py, fleet/collect-host.sh):
+# the public report never carries IPs/ports/images/server_names, drift classification,
+# and degraded input never breaking the report. Stdlib only; no secrets, no network.
+# Hosted runner: this repo is public, so hosted minutes are free.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'fleet/**'
+      - '.github/workflows/fleet-tests.yml'
+  pull_request:
+    paths:
+      - 'fleet/**'
+      - '.github/workflows/fleet-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run fleet tests
+        run: python3 -m unittest discover -s fleet -v

@@ -16,3 +16,6 @@ keys/
 .DS_Store
 Thumbs.db
 *.log
+
+# Python bytecode (fleet/fleet_facts.py tests)
+__pycache__/
