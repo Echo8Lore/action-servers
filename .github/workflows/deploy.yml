@@ -15,6 +15,11 @@ name: Reusable Deploy
 #         proxy_container: myapp_nginx
 #         health_path: /api/health
 #       secrets: inherit
+#
+# Notifications: Telegram (Hermes's bot, via ops/notify-telegram.sh, sendMessage only)
+# when both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID reach this workflow; otherwise the
+# notify job skips with a notice. SLACK_WEBHOOK_URL is still accepted so callers that
+# pass it explicitly keep working, but it is ignored (OPS-35).
 
 on:
   workflow_call:
@@ -38,7 +43,9 @@ on:
       VPS_USERNAME:      { required: true }
       PRODUCTION_URL:    { required: false }                 # health-check base URL
       DEPLOY_ENV_JSON:   { required: false }                 # JSON object -> .env on first deploy
-      SLACK_WEBHOOK_URL: { required: false }
+      TELEGRAM_BOT_TOKEN: { required: false }                # deploy notification (with chat id)
+      TELEGRAM_CHAT_ID:  { required: false }
+      SLACK_WEBHOOK_URL: { required: false }                 # DEPRECATED, ignored; kept so explicit callers don't break
 
 permissions:
   contents: read
@@ -174,12 +181,54 @@ jobs:
     if: always() && (success() || failure())
     runs-on: ubuntu-latest
     steps:
-      - name: Slack notify
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+      # Secrets can't be tested in a step `if:`, so map them to env and test there.
+      - name: Check Telegram config
+        id: cfg
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Telegram not configured (TELEGRAM_BOT_TOKEN and/or TELEGRAM_CHAT_ID not passed) - deploy notification skipped"
+          fi
+
+      # The caller's checkout doesn't have ops/, so fetch the notifier from this public
+      # repo (same pattern as runner-restart.yml): one sender, one token-hygiene
+      # implementation. job.workflow_sha is the commit of the workflow file defining
+      # this job, i.e. the action-servers commit the caller resolved (e.g. @v1), so
+      # the script matches the workflow. If it is empty at runtime, checkout falls
+      # back to the default branch.
+      - uses: actions/checkout@v5
+        if: steps.cfg.outputs.configured == 'true'
         continue-on-error: true
-        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a  # v2
         with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            text: "${{ needs.deploy.result == 'success' && '✅ Deploy succeeded' || '🔴 DEPLOY FAILED' }} — ${{ github.repository }}@${{ github.sha }}\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          repository: Echo8Lore/action-servers
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: ops
+          path: .action-servers
+          persist-credentials: false
+
+      - name: Telegram notify
+        if: steps.cfg.outputs.configured == 'true'
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RESULT: ${{ needs.deploy.result }}
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ inputs.ref || github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          APP_DIR: ${{ inputs.app_dir }}
+        run: |
+          if [ "$RESULT" = "success" ]; then STATUS="Deploy succeeded"; else STATUS="DEPLOY FAILED"; fi
+          if [ ! -f .action-servers/ops/notify-telegram.sh ]; then
+            echo "::warning::notify-telegram.sh not available (checkout failed) - deploy notification not sent"
+            exit 0
+          fi
+          printf '%s: %s@%s (%s)\nApp dir: %s\nRun: %s\n' \
+            "$STATUS" "$REPO" "${SHA:0:12}" "$REF_NAME" "$APP_DIR" "$RUN_URL" \
+            | bash .action-servers/ops/notify-telegram.sh || true

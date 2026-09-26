@@ -25,7 +25,7 @@ GitHub repo/org secrets or a local, gitignored config file.
 | `.github/workflows/runner-health.yml` | Fleet health monitor (cron) — liveness, disk, stale jobs, auto-restart |
 | `.github/workflows/runner-restart.yml` | Parameterized runner restart (dispatch + `workflow_call`) |
 | `.github/workflows/queue-watchdog.yml`, `ops/queue_watchdog.py` | Alerts on jobs stuck in the queue across the fleet's repos (30 min if no runner can take the job, 2 h if runners are just busy; again at 6 h) and says which |
-| `ops/notify-telegram.sh` | Sends one plain-text alert via the Telegram Bot API (`sendMessage` only; token never logged). Used by the health monitor, restart and queue-watchdog workflows |
+| `ops/notify-telegram.sh` | Sends one plain-text alert via the Telegram Bot API (`sendMessage` only; token never logged). Used by the health monitor, restart and queue-watchdog workflows, and by the reusable deploy workflow for deploy notifications |
 | `.github/workflows/fleet-inventory.yml` | Daily read-only poll of every inventory host (OS, uptime, disk, memory, runner units, nginx/docker presence); maps `domains[]` to hosts by DNS and reports runner drift vs the inventory. No IPs in the public report |
 | `fleet/collect-facts.sh`, `fleet/collect-host.sh`, `fleet/fleet_facts.py` | The collector it runs over SSH, the per-host driver, and the parser/report builder |
 | `docs/ONBOARDING.md` | How to add a project (runner + deploy + secrets) |

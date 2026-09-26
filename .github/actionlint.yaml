@@ -1,0 +1,13 @@
+self-hosted-runner:
+  labels:
+    # queue-watchdog-selftest.yml queues a job on this label ON PURPOSE (no runner
+    # carries it), to prove the watchdog pages. Declared so actionlint stays clean.
+    - queue-watchdog-selftest-no-such-runner
+
+paths:
+  # deploy.yml's notifier checkout uses job.workflow_sha (documented job-context
+  # property: SHA of the workflow file defining the job). actionlint 1.7.12 doesn't
+  # know it yet; drop this ignore once actionlint does.
+  .github/workflows/deploy.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined in object type'
