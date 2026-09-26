@@ -11,8 +11,12 @@ hosts:
                                # (warhammer-40k-database); neither is tracked here.
     disk_threshold: 85
 
-  - id: ovh-devops-001         # OVH vps-f8fe5d07, now "WebHosting_Server_001" (staging web host)
-    ssh_secret_prefix: DEVOPS001
+  - id: ovh-devops-001         # OVH vps-f8fe5d07 (CI box 2). Despite its old
+    ssh_secret_prefix: DEVOPS001  # "WebHosting_Server_001" name it serves no web
+    disk_threshold: 85            # traffic (no nginx, per the OPS-28 poll).
+
+  - id: hosting-vps            # OVH vps-e0eef96f, the staging web host (weaponslore.com).
+    ssh_secret_prefix: HOSTING # Web only: no runners are ever placed here (OPS-17).
     disk_threshold: 85
 
 # Extra repos queue-watchdog.yml scans for stuck jobs, beyond the repos implied by

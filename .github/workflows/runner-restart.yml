@@ -25,7 +25,7 @@ on:
         required: true
         type: string
       ssh_secret_prefix:
-        description: 'Host secret prefix from fleet/inventory.yml (DEVOPS = ovh-staging, DEVOPS001 = ovh-devops-001)'
+        description: 'Host secret prefix from fleet/inventory.yml (DEVOPS = ovh-staging, DEVOPS001 = ovh-devops-001; HOSTING = hosting-vps has no runners)'
         required: false
         default: DEVOPS
         type: string
