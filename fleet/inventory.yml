@@ -15,6 +15,13 @@ hosts:
     ssh_secret_prefix: DEVOPS001
     disk_threshold: 85
 
+# Extra repos queue-watchdog.yml scans for stuck jobs, beyond the repos implied by
+# runners[] (repo targets + every repo of an org target). Their runners are not
+# tracked here.
+watch_repos:
+  - ResearchMonkey/warhammer-40k-database
+  - ResearchMonkey/Codex_of_things
+
 # Domains fleet-inventory.yml resolves and maps to the host whose IPs match.
 domains:
   - weaponslore.com

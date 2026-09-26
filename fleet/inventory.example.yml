@@ -14,6 +14,11 @@ hosts:
     ssh_secret_prefix: DEVOPS     # -> DEVOPS_VPS_HOST / _USERNAME / _SSH_KEY secrets
     disk_threshold: 85            # percent; monitor warns above this
 
+# Extra repos the queue watchdog scans for jobs stuck in the queue, beyond those implied
+# by runners[] (repo targets + all repos of an org target).
+watch_repos:
+  - your-handle/another-repo
+
 # Domains the fleet-inventory workflow resolves; each DNS record is matched to the
 # host whose addresses it points at (reported by host id, never by IP).
 domains:

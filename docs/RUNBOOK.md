@@ -12,6 +12,8 @@ Day-2 operations for the runner fleet and deploys. Most of this is automated by
 | Job stuck in-progress >60m | Cancel the run in the Actions UI; check the runner is healthy |
 | Deploy failed | Re-run the deploy workflow; or `deploy/deploy.sh` locally; rollback = re-deploy previous ref |
 | Token expired (registration) | Mint a fresh one with `gh api ... registration-token` |
+| Queue-watchdog alert: "NO registered runner has these labels" (pages at 30 min) | The job's `runs-on` labels match no runner: register one with those labels, or fix the workflow's `runs-on`. It will otherwise be cancelled at 24 h |
+| Queue-watchdog alert: "online but busy" (pages at 2 h) | Backlog, not a missing runner: wait, cancel superseded runs, or add runner capacity for those labels |
 | Unsure which host serves a domain, or what runs where | Run **Fleet Inventory** (daily; dispatchable) and read its step summary. Poll, don't trust notes |
 
 ## Runners

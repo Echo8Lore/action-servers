@@ -1,0 +1,129 @@
+name: Queue Watchdog
+
+# Alerts (Telegram, via ops/notify-telegram.sh) when a job is stuck in the queue
+# anywhere in the fleet's repos, and says WHY. Thresholds are per class (owner
+# decision):
+#   - 30 min when no runner can take it: no registered runner carries its labels (a
+#     missing runner -- FieldKit v0.1.4's Windows release waited silently for GitHub's
+#     24h cancel), matching runners all offline, or the runner list is unreadable.
+#   - 2 h when it is only waiting its turn: matching runner busy/idle, or GitHub-hosted
+#     (a backlog usually clears on its own).
+#   - Every class pages once more at 6 h if still queued.
+# Logic and its tests: ops/queue_watchdog.py, ops/test_queue_watchdog.py.
+#
+# Repos watched: every repo-scope runner target and every repo of an org-scope target
+# in fleet/inventory.yml, plus its `watch_repos:` list (repos whose runners the
+# inventory does not track).
+#
+# CADENCE. The 30-minute target is only as good as the trigger. GitHub throttles cron
+# to roughly 6 runs/day, so this schedule alone can notice a stuck job hours late;
+# moving the trigger to a systemd timer (OPS-23) is what makes 30 minutes real. Until
+# then, run it by hand (workflow_dispatch) when a job looks stuck.
+#
+# Why a separate workflow and not runner-health's check-stale-jobs: that job looks at
+# runs IN PROGRESS for over 60 min (a slow or hung job) and alerts every run; this one
+# looks at JOBS still QUEUED, needs each job's labels matched against the runner list,
+# and needs dedupe state. Different question, cadence and alert policy.
+#
+# Dedupe: each stuck job alerts once at its class threshold (30 min or 2 h) and once
+# more at 6 h. busy / idle_match / hosted share one "waiting" bucket, so a runner
+# flapping busy<->idle pages once; a move to a blocking class (waiting ->
+# runners_offline) is new information and pages once more. State ("<repo>#<job id>"
+# -> {bucket: thresholds alerted}) lives in the Actions cache, saved under a new key
+# each run and restored by prefix. It is normalized on read, so a junk entry cannot
+# crash every later scan; and the scan never writes the saved file, so a crashed scan
+# at worst re-saves the previous state. New state is adopted only after Telegram
+# accepted the message, so a failed send retries next run. If the cache is evicted, a
+# still-stuck job alerts once more: that errs toward paging, not silence.
+#
+# Public repo, public logs: the log carries repo names, runner labels, queue age and
+# the classification only. Workflow/job names and run URLs (some repos are private)
+# go to Telegram only.
+#
+# Hosted runner on purpose: the watchdog must not depend on the self-hosted runners
+# whose absence it exists to report. Public repo, so hosted minutes are free.
+#
+# Required secrets: RUNNER_HEALTH_PAT (reads runs, jobs and runners; admin scope for
+# the runner lists), TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID. Any missing -> warning.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # throttled by GitHub; see CADENCE above
+  workflow_dispatch:
+    inputs:
+      threshold_minutes:
+        description: 'Page when no runner can take a job after this many minutes'
+        type: number
+        default: 30
+      busy_threshold_minutes:
+        description: 'Page when runners are just busy (or hosted) after this many minutes'
+        type: number
+        default: 120
+
+# contents: read only. actions/cache talks to the cache service with the job's runtime
+# token (ACTIONS_RUNTIME_TOKEN), not GITHUB_TOKEN; the `actions` permission governs the
+# Actions REST API (e.g. deleting caches), which this workflow does not call.
+permissions:
+  contents: read
+
+concurrency:
+  group: queue-watchdog
+  cancel-in-progress: false   # two scans racing would fork the dedupe state
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Restore dedupe state
+        uses: actions/cache/restore@v4
+        with:
+          path: .queue-watchdog
+          key: queue-watchdog-state-${{ github.run_id }}
+          restore-keys: queue-watchdog-state-
+
+      - name: Scan queued jobs
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_HEALTH_PAT }}
+          THRESHOLD: ${{ inputs.threshold_minutes || 30 }}
+          BUSY_THRESHOLD: ${{ inputs.busy_threshold_minutes || 120 }}
+        run: |
+          set -euo pipefail
+          mkdir -p .queue-watchdog
+          [ -f .queue-watchdog/state.json ] || echo '{}' > .queue-watchdog/state.json
+          yq -o=json '.' fleet/inventory.yml > "$RUNNER_TEMP/inventory.json"
+          python3 ops/queue_watchdog.py scan \
+            --inventory "$RUNNER_TEMP/inventory.json" \
+            --state .queue-watchdog/state.json \
+            --new-state "$RUNNER_TEMP/new-state.json" \
+            --message "$RUNNER_TEMP/message.txt" \
+            --threshold-min "$THRESHOLD" --busy-threshold-min "$BUSY_THRESHOLD" \
+            --repeat-min 360
+
+      - name: Alert and adopt state
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -uo pipefail
+          if [ ! -s "$RUNNER_TEMP/message.txt" ]; then
+            echo "No new alerts."
+            cp "$RUNNER_TEMP/new-state.json" .queue-watchdog/state.json
+            exit 0
+          fi
+          rc=0
+          bash ops/notify-telegram.sh < "$RUNNER_TEMP/message.txt" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            cp "$RUNNER_TEMP/new-state.json" .queue-watchdog/state.json
+          else
+            echo "::warning::Alert not delivered (exit ${rc}); keeping the old state so it retries next run."
+          fi
+
+      - name: Save dedupe state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .queue-watchdog
+          key: queue-watchdog-state-${{ github.run_id }}
