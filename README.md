@@ -24,6 +24,8 @@ GitHub repo/org secrets or a local, gitignored config file.
 | `.github/workflows/deploy.yml` | **Reusable** deploy workflow — projects `uses:` this |
 | `.github/workflows/runner-health.yml` | Fleet health monitor (cron) — liveness, disk, stale jobs, auto-restart |
 | `.github/workflows/runner-restart.yml` | Parameterized runner restart (dispatch + `workflow_call`) |
+| `.github/workflows/fleet-inventory.yml` | Daily read-only poll of every inventory host (OS, uptime, disk, memory, runner units, nginx/docker presence); maps `domains[]` to hosts by DNS and reports runner drift vs the inventory. No IPs in the public report |
+| `fleet/collect-facts.sh`, `fleet/collect-host.sh`, `fleet/fleet_facts.py` | The collector it runs over SSH, the per-host driver, and the parser/report builder |
 | `docs/ONBOARDING.md` | How to add a project (runner + deploy + secrets) |
 | `docs/RUNBOOK.md` | Operate the fleet: restart, scale, disk, token rotation |
 
@@ -36,8 +38,8 @@ GitHub has no user-account runner level — a runner binds to a **repo** or an *
 - **Personal repos** → one **repo-level** runner each.
 
 Both kinds run as separate `systemd` services on the same VPS (multi-runner-per-host).
-Every registration is recorded in `fleet/inventory.yml` (gitignored), which drives the
-health monitor.
+Every registration is recorded in `fleet/inventory.yml` (committed — no secrets, no IPs),
+which drives the health monitor.
 
 ## Quick start
 

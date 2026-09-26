@@ -15,6 +15,10 @@ hosts:
     ssh_secret_prefix: DEVOPS001
     disk_threshold: 85
 
+# Domains fleet-inventory.yml resolves and maps to the host whose IPs match.
+domains:
+  - weaponslore.com
+
 runners:
   - name: org-runner-02
     host: ovh-devops-001

@@ -12,6 +12,7 @@ Day-2 operations for the runner fleet and deploys. Most of this is automated by
 | Job stuck in-progress >60m | Cancel the run in the Actions UI; check the runner is healthy |
 | Deploy failed | Re-run the deploy workflow; or `deploy/deploy.sh` locally; rollback = re-deploy previous ref |
 | Token expired (registration) | Mint a fresh one with `gh api ... registration-token` |
+| Unsure which host serves a domain, or what runs where | Run **Fleet Inventory** (daily; dispatchable) and read its step summary. Poll, don't trust notes |
 
 ## Runners
 
