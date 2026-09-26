@@ -14,6 +14,7 @@ Day-2 operations for the runner fleet and deploys. Most of this is automated by
 | Token expired (registration) | Mint a fresh one with `gh api ... registration-token` |
 | Queue-watchdog alert: "NO registered runner has these labels" (pages at 30 min) | The job's `runs-on` labels match no runner: register one with those labels, or fix the workflow's `runs-on`. It will otherwise be cancelled at 24 h |
 | Queue-watchdog alert: "online but busy" (pages at 2 h) | Backlog, not a missing runner: wait, cancel superseded runs, or add runner capacity for those labels |
+| Prove the queue watchdog pages (fire drill) | Dispatch **Queue Watchdog Self-Test**, then **Queue Watchdog** with `threshold_minutes: 1`; expect a "NO registered runner" Telegram page; then `gh run cancel` the self-test run promptly (a forgotten one pages again at 30 min and 6 h) |
 | Unsure which host serves a domain, or what runs where | Run **Fleet Inventory** (daily; dispatchable) and read its step summary. Poll, don't trust notes |
 
 ## Runners

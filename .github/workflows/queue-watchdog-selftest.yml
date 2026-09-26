@@ -1,0 +1,39 @@
+name: Queue Watchdog Self-Test
+
+# FIRE DRILL for queue-watchdog.yml: proves live that a job no runner can take gets
+# paged. Its one job asks for a label no runner will ever carry, so it sits queued.
+#
+#   1. Dispatch this workflow:        gh workflow run queue-watchdog-selftest.yml
+#   2. Wait a minute or two, then:    gh workflow run queue-watchdog.yml -f threshold_minutes=1
+#   3. Expect a Telegram page naming this repo, the label below and
+#      "NO registered runner has these labels".
+#   4. CANCEL THIS RUN:               gh run cancel <run-id>
+#
+# Always do step 4, promptly. The drill page is recorded against threshold 1, so a
+# forgotten run pages AGAIN when a scheduled scan sees it past the normal 30 min, again
+# at 6 h, and only ends when GitHub cancels it at its 24 h queue limit. (timeout-minutes
+# below does not help: it limits execution time, and this job never starts.)
+#
+# This repo is in the Echo8Lore org, so the watchdog checks the org runner list too. If
+# the page says "unknown" instead of "NO registered runner", RUNNER_HEALTH_PAT cannot
+# read the org's runners -- a finding in itself.
+#
+# workflow_dispatch only -- never scheduled or push-triggered.
+
+on:
+  workflow_dispatch:
+
+# Re-dispatching the drill cancels a forgotten queued one instead of stacking pages.
+concurrency:
+  group: queue-watchdog-selftest
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unrunnable:
+    runs-on: [self-hosted, queue-watchdog-selftest-no-such-runner]
+    timeout-minutes: 5
+    steps:
+      - run: echo "Unreachable -- no runner carries this job's labels."
