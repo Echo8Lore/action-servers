@@ -7,7 +7,8 @@ name: Restart Self-Hosted Runner
 # Required secrets (per host, selected by the ssh_secret_prefix input):
 #   - <PREFIX>_VPS_HOST, <PREFIX>_VPS_USERNAME, <PREFIX>_VPS_SSH_KEY
 #   - RUNNER_HEALTH_PAT (admin scope on the org + personal repos, for the verify step)
-#   - SLACK_WEBHOOK_URL (optional, success notification)
+#   - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (optional; outcome notification via
+#     ops/notify-telegram.sh, fetched from Echo8Lore/action-servers main)
 #
 # Multi-host: the host is chosen by ssh_secret_prefix (the host's value in
 # fleet/inventory.yml), resolved via secrets[format(...)].
@@ -93,6 +94,7 @@ jobs:
             sudo systemctl status "$UNIT" --no-pager
 
       - name: Verify runner is online
+        id: verify
         env:
           GH_TOKEN: ${{ secrets.RUNNER_HEALTH_PAT }}
           # Not RUNNER_NAME: the job's own runner sets that variable and it wins.
@@ -109,6 +111,7 @@ jobs:
               --jq ".runners[] | select(.name == \"$TARGET_RUNNER\") | .status" 2>/dev/null || true)
             if [ "$STATUS" = "online" ]; then
               echo "Runner $TARGET_RUNNER is back online."
+              echo "online=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             echo "Attempt $i: $TARGET_RUNNER status '${STATUS:-unknown}'. Retrying in 10s..."
@@ -116,12 +119,28 @@ jobs:
           done
           echo "::warning::Runner $TARGET_RUNNER not confirmed online after restart (may still be recovering)."
 
-      - name: Slack notification
+      - uses: actions/checkout@v5
         if: success()
         continue-on-error: true
-        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a  # v2
         with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            text: "✅ Self-hosted runner `${{ inputs.runner_name }}` restarted and verified online."
+          # Public repo, fixed location: works whichever repo calls this workflow.
+          repository: Echo8Lore/action-servers
+          ref: main
+          sparse-checkout: ops
+
+      # Only claims "verified online" when the verify step actually saw it online.
+      - name: Telegram notification
+        if: success()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TARGET_RUNNER: ${{ inputs.runner_name }}
+          ONLINE: ${{ steps.verify.outputs.online }}
+        run: |
+          if [ "$ONLINE" = "true" ]; then
+            MSG="Self-hosted runner ${TARGET_RUNNER} restarted and verified online."
+          else
+            MSG="Self-hosted runner ${TARGET_RUNNER} restart sent, but it was NOT confirmed online."
+          fi
+          printf '%s\n' "$MSG" | bash ops/notify-telegram.sh || true

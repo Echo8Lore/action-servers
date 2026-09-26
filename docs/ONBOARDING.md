@@ -10,7 +10,8 @@ both **org** repos (`Echo8Lore/*`) and **personal** repos.
   or a GitHub App works; the `gh` CLI authenticated as you is simplest for 2 owners.
 - Fleet secrets configured on **this** (`action-servers`) repo for the monitor:
   `RUNNER_HEALTH_PAT`, `DEVOPS_VPS_HOST`, `DEVOPS_VPS_USERNAME`, `DEVOPS_VPS_SSH_KEY`,
-  and optionally `SLACK_WEBHOOK_URL`.
+  and `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for alerts (without them the monitor
+  runs but cannot alert).
 
 ## 1. Give the project a runner
 
