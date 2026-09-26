@@ -15,6 +15,7 @@ Day-2 operations for the runner fleet and deploys. Most of this is automated by
 | Queue-watchdog alert: "NO registered runner has these labels" (pages at 30 min) | The job's `runs-on` labels match no runner: register one with those labels, or fix the workflow's `runs-on`. It will otherwise be cancelled at 24 h |
 | Queue-watchdog alert: "online but busy" (pages at 2 h) | Backlog, not a missing runner: wait, cancel superseded runs, or add runner capacity for those labels |
 | Prove the queue watchdog pages (fire drill) | Dispatch **Queue Watchdog Self-Test**, then **Queue Watchdog** with `threshold_minutes: 1`; expect a "NO registered runner" Telegram page; then `gh run cancel` the self-test run promptly (a forgotten one pages again at 30 min and 6 h) |
+| `HOST KEY VERIFICATION FAILED` in a fleet job | The host presented a key that isn't the one pinned in `fleet/known_hosts`. Don't re-pin blindly: see **Host key changed** below |
 | Unsure which host serves a domain, or what runs where | Run **Fleet Inventory** (daily; dispatchable) and read its step summary. Poll, don't trust notes |
 
 ## Runners
@@ -74,6 +75,38 @@ Then confirm the runner that was holding it is online (restart if not).
   reach each host: `DEVOPS` (ovh-staging), `DEVOPS001` (ovh-devops-001), `HOSTING`
   (hosting-vps). Rotate the key on the host and update that prefix's `_VPS_SSH_KEY`.
 - Per-project deploy secrets (`VPS_*`, `DEPLOY_ENV_JSON`) live on each project repo.
+- **Host keys** are not secrets: each fleet host's ED25519 key is committed in
+  `fleet/known_hosts` under its inventory id, and every fleet SSH call (inventory,
+  disk check, restart) verifies it with `StrictHostKeyChecking=yes` (OPS-33).
+
+## Host key changed
+
+A fleet job fails with `HOST KEY VERIFICATION FAILED` (fleet-inventory reports the host
+as `host_key_mismatch`) when the host presents a key other than the pinned one. The
+usual cause is a reinstalled VPS or regenerated host keys; the other one is a
+man-in-the-middle. Treat it as the second until you've shown it's the first:
+
+1. **Verify out of band.** Log in over a path you trust (the OVH KVM/rescue console, or
+   an SSH session whose key you already trust) and read the host's own key:
+   ```bash
+   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   ```
+2. **Compare** with what the network presents, from a machine you control:
+   ```bash
+   ssh-keyscan -t ed25519 <address> 2>/dev/null | ssh-keygen -lf -
+   ```
+   The two SHA256 fingerprints must be identical. If they differ, stop: something on
+   the path is answering for the host.
+3. **Re-pin by PR.** Replace the host's line in `fleet/known_hosts`, keyed by the
+   inventory id, never the address (`ssh-keyscan -H` hashes are brute-forceable back to
+   an IPv4 address, and this repo is public):
+   ```bash
+   ssh-keyscan -t ed25519 <address> 2>/dev/null | awk -v id=<host-id> '{print id, $2, $3}'
+   ```
+   Update the fingerprint in the file's header comment too (`Fleet Tests` checks that it
+   matches). Merge, then re-run **Fleet Inventory** to confirm the host is `ok`.
+
+Removing a host: delete its `hosts:` entry and its `fleet/known_hosts` line together.
 
 ## Deploys
 
@@ -92,8 +125,9 @@ Then confirm the runner that was holding it is online (restart if not).
 - **More parallelism for the org:** register a second org runner on the same (or a new)
   host — GitHub distributes jobs round-robin.
 - **A second host:** bootstrap it, register runners, add a `hosts:` entry to the
-  inventory with its own `ssh_secret_prefix`, and add the matching `<PREFIX>_VPS_*`
-  secrets. The monitor's disk check and auto-restart pick each host's secret set from
+  inventory with its own `ssh_secret_prefix`, pin its host key in `fleet/known_hosts`
+  (as in **Host key changed**, step 3, after checking the fingerprint on the host), and
+  add the matching `<PREFIX>_VPS_*` secrets. The monitor's disk check and auto-restart pick each host's secret set from
   its prefix automatically; manual restarts take it as the `ssh_secret_prefix` input.
 - **Poll-only hosts:** a `hosts:` entry doesn't need runners. `hosting-vps` (the web
   host) is polled for facts and disk but never carries runners (OPS-17); a runner unit

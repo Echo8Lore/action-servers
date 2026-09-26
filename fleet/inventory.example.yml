@@ -4,7 +4,9 @@
 # NO host IP addresses, so it is safe in a public repo and the health workflow can read
 # it from the checkout. Host addresses + SSH keys live in GitHub secrets, selected by
 # each host's `ssh_secret_prefix` (e.g. prefix "DEVOPS" -> secrets DEVOPS_VPS_HOST,
-# DEVOPS_VPS_USERNAME, DEVOPS_VPS_SSH_KEY).
+# DEVOPS_VPS_USERNAME, DEVOPS_VPS_SSH_KEY). Each host's `id` must also have its SSH host
+# key pinned in fleet/known_hosts (`<id> ssh-ed25519 AAAA...`); the fleet workflows
+# refuse to connect to a host without one.
 #
 # Keep this current as you register / remove runners. Each runner entry maps 1:1 to a
 # register-runner.sh invocation; copy the `systemd_unit` it prints.

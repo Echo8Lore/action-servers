@@ -12,6 +12,14 @@ name: Restart Self-Hosted Runner
 #
 # Multi-host: the host is chosen by ssh_secret_prefix (the host's value in
 # fleet/inventory.yml), resolved via secrets[format(...)].
+#
+# Host key (OPS-33): the prefix is mapped to its inventory host id, and ssh verifies
+# the key pinned for that id in fleet/known_hosts (fleet/pinned-ssh.sh). A prefix with
+# no inventory host, a host with no pinned key, or a different key presented fails the
+# job before anything runs on the host. Plain ssh rather than appleboy/ssh-action, for
+# the reason given at runner-health.yml's check-disk job. fleet/ is checked out from
+# this repo at job.workflow_sha (the commit of this workflow file, whoever calls it),
+# so the pins always match the workflow that uses them.
 
 on:
   workflow_dispatch:
@@ -59,16 +67,50 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: Echo8Lore/action-servers
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: fleet
+          path: .action-servers
+          persist-credentials: false
+
       - name: Restart runner service via SSH
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
         env:
           UNIT: ${{ inputs.systemd_unit }}
-        with:
-          host: ${{ secrets[format('{0}_VPS_HOST', inputs.ssh_secret_prefix)] }}
-          username: ${{ secrets[format('{0}_VPS_USERNAME', inputs.ssh_secret_prefix)] }}
-          key: ${{ secrets[format('{0}_VPS_SSH_KEY', inputs.ssh_secret_prefix)] }}
-          envs: UNIT
-          script: |
+          PREFIX: ${{ inputs.ssh_secret_prefix }}
+          SSH_HOST: ${{ secrets[format('{0}_VPS_HOST', inputs.ssh_secret_prefix)] }}
+          SSH_USER: ${{ secrets[format('{0}_VPS_USERNAME', inputs.ssh_secret_prefix)] }}
+          SSH_KEY: ${{ secrets[format('{0}_VPS_SSH_KEY', inputs.ssh_secret_prefix)] }}
+        run: |
+          set -euo pipefail
+          FLEET=.action-servers/fleet
+          # The unit name goes into the remote command line: accept unit names only.
+          if ! [[ "$UNIT" =~ ^[A-Za-z0-9@._:-]+\.service$ ]]; then
+            echo "::error::systemd_unit is not a plain .service unit name"; exit 1
+          fi
+          HOST_ID=$(PREFIX="$PREFIX" yq -r '[.hosts[] | select(.ssh_secret_prefix == strenv(PREFIX)) | .id] | .[]' "$FLEET/inventory.yml")
+          if [ -z "$HOST_ID" ] || [ "$(printf '%s\n' "$HOST_ID" | wc -l)" -ne 1 ]; then
+            echo "::error::ssh_secret_prefix '${PREFIX}' matches no single host in fleet/inventory.yml"; exit 1
+          fi
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_KEY" ]; then
+            echo "::error::${HOST_ID}: ${PREFIX}_VPS_* secrets not configured"; exit 1
+          fi
+          echo "Host: ${HOST_ID} (prefix ${PREFIX})"
+          source "$FLEET/pinned-ssh.sh"
+          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/key"
+          chmod 600 "$RUNNER_TEMP/key"
+          pinned_ssh_opts "$HOST_ID" "$RUNNER_TEMP/key"
+          # Remote stderr is folded into stdout (2>&1 runs on the host), so the local
+          # ssh.err only holds ssh's own messages. UNIT expands here on purpose
+          # (validated above).
+          rc=0
+          # shellcheck disable=SC2029
+          ssh "${PINNED_SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "UNIT='${UNIT}' bash -s 2>&1" \
+            2> "$RUNNER_TEMP/ssh.err" <<'REMOTE' || rc=$?
+          # One function, read whole before it runs: nothing below can eat the rest of
+          # the script from stdin (bash -s), and sudo gets /dev/null, not the script.
+          restart() {
             echo "=== Runner service status (before) ==="
             sudo systemctl status "$UNIT" --no-pager || true
 
@@ -92,6 +134,15 @@ jobs:
             echo "=== Runner service status (after) ==="
             sleep 5
             sudo systemctl status "$UNIT" --no-pager
+          }
+          restart </dev/null
+          REMOTE
+          krc=0
+          pinned_ssh_check "$HOST_ID" "$rc" "$RUNNER_TEMP/ssh.err" || krc=$?
+          [ "$krc" -eq 2 ] && exit 1
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::${HOST_ID}: restart over SSH failed (exit ${rc})"; exit 1
+          fi
 
       - name: Verify runner is online
         id: verify

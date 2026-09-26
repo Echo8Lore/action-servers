@@ -9,6 +9,8 @@ What they pin:
   2. Runner drift: missing / misplaced / extra / unverified.
   3. Degraded input never takes the pipeline down: empty or absent sections, truncated
      collector output, malformed host files, a bad GPG key, a failed SSH.
+  4. Host keys (OPS-33): the driver only connects with the pinned-key options, refuses
+     a host with no pin, and fails loudly (without leaking an address) on a mismatch.
 DNS is stubbed and the driver runs with a stub ssh; nothing here touches the network.
 """
 
@@ -229,8 +231,11 @@ class CollectHostScript(unittest.TestCase):
             stub = t / "ssh"
             stub.write_text("#!/usr/bin/env bash\n" + fake_ssh_body + "\n")
             stub.chmod(0o755)
+            kh = t / "known_hosts"
+            kh.write_text("# test pins\nh ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCudSiOiYSZ8iHzEm+r5pwFYXNktWqGFW3aXJMbn/pY\n")
             e = dict(os.environ, HOST_ID="h", PREFIX="P", SSH_HOST="192.0.2.50", SSH_USER="u",
-                     SSH_KEY="dummy", DOMAINS="", SSH_CMD=str(stub), OUT_DIR=str(t / "out"))
+                     SSH_KEY="dummy", DOMAINS="", SSH_CMD=str(stub), OUT_DIR=str(t / "out"),
+                     PINNED_KNOWN_HOSTS=str(kh))
             if fail_python_subcommand:
                 # A python3 first on PATH that runs the real interpreter, except that it
                 # fails the named fleet_facts.py subcommand.
@@ -259,6 +264,41 @@ class CollectHostScript(unittest.TestCase):
         self.assertNotIn("198.51.100.99", p.stdout + p.stderr)
         self.assertIn("SSH failed (exit 255)", p.stdout)
         self.assertEqual(json.loads(outs["h.json"])["status"], "unreachable")
+
+    def test_ssh_runs_with_pinned_host_key_options(self):
+        # The stub records its argv into out/ (collector output is irrelevant here).
+        p, outs = self.run_host('printf "%s\\n" "$@" > "$OUT_DIR/ssh.args"; exit 255')
+        args = outs["ssh.args"].splitlines()
+        for opt in ("HostKeyAlias=h", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=/dev/null",
+                    "UpdateHostKeys=no", "CheckHostIP=no"):
+            self.assertIn(opt, args)
+        self.assertTrue(any(a.startswith("UserKnownHostsFile=") and a.endswith("known_hosts")
+                            for a in args), args)
+        self.assertFalse(any("accept-new" in a for a in args))
+
+    def test_no_pinned_key_refuses_to_connect(self):
+        p, outs = self.run_host('touch "$OUT_DIR/ssh.called"; exit 0', HOST_ID="unpinned")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("::error::unpinned: no pinned host key", p.stdout)
+        self.assertNotIn("ssh.called", outs)
+        self.assertEqual(json.loads(outs["unpinned.json"])["status"], "no_pinned_key")
+
+    def test_pin_lookup_is_by_exact_id(self):
+        # "h" is pinned; "hh" (a prefix match) is not.
+        p, outs = self.run_host("exit 0", HOST_ID="hh")
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(json.loads(outs["hh.json"])["status"], "no_pinned_key")
+
+    def test_host_key_mismatch_fails_loudly_without_leaking(self):
+        body = ("echo '@@@@@@@@@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@@@@' >&2\n"
+                "echo 'Host key for 198.51.100.99 has changed' >&2\n"
+                "echo 'Host key verification failed.' >&2\n"
+                "exit 255")
+        p, outs = self.run_host(body)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("::error::h: HOST KEY VERIFICATION FAILED", p.stdout)
+        self.assertNotIn("198.51.100.99", p.stdout + p.stderr)
+        self.assertEqual(json.loads(outs["h.json"])["status"], "host_key_mismatch")
 
     def test_truncated_collector_output(self):
         body = "cat <<'EOF'\n" + RAW.split("@@@ docker")[0] + "EOF"

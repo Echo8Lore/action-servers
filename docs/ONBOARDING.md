@@ -13,6 +13,10 @@ both **org** repos (`Echo8Lore/*`) and **personal** repos.
   `hosts:` entry in `fleet/inventory.yml` (today `DEVOPS`, `DEVOPS001`, `HOSTING`),
   and `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for alerts (without them the monitor
   runs but cannot alert).
+- Each `hosts:` entry's SSH host key pinned in `fleet/known_hosts` as
+  `<host-id> ssh-ed25519 AAAA...` (keyed by id, never by address; fingerprint checked
+  on the host first; see RUNBOOK "Host key changed"). A host without a pinned key is
+  never connected to: its inventory, disk check and restart legs fail.
 
 ## 1. Give the project a runner
 
@@ -102,6 +106,7 @@ cp deploy/config.example.json deploy/config.json   # edit for the project
 
 - [ ] Runner online for the repo (org runner, or a registered repo runner)
 - [ ] `fleet/inventory.yml` updated + committed (personal runners only)
+- [ ] New host? Its host key pinned in `fleet/known_hosts` (same PR as its `hosts:` entry)
 - [ ] `deploy.yml` added to the project, pinned to `@v1`
 - [ ] Deploy secrets set on the project (or org)
 - [ ] First deploy green (containers + health gate pass)

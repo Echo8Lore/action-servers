@@ -17,6 +17,9 @@ name: Runner Health Monitor
 #   - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  (alerts; if either is empty the monitor
 #     still runs and warns that it cannot alert)
 #
+# Host keys: every SSH call verifies the host's key pinned in fleet/known_hosts (OPS-33);
+# a mismatch fails that leg with HOST KEY VERIFICATION FAILED. No secret involved.
+#
 # Prove the alert path end to end without an outage: Run workflow with test_alert
 # checked. It sends one "[test]" message even when the fleet is healthy, and FAILS the
 # alert job if Telegram does not accept it.
@@ -122,8 +125,15 @@ jobs:
           fi
 
   # ── Host disk check (every inventory host) ───────────────────────────────
-  # A failing leg (disk over threshold or SSH unreachable) fails this job; the
-  # alert job reads needs.check-disk.result.
+  # A failing leg (disk over threshold, SSH unreachable, or a host key that does not
+  # match fleet/known_hosts) fails this job; the alert job reads
+  # needs.check-disk.result.
+  #
+  # Plain ssh with the pinned host key (fleet/pinned-ssh.sh, OPS-33) rather than
+  # appleboy/ssh-action: that action's `fingerprint` input takes one SHA256 per host
+  # and drone-ssh (Go) picks the host key algorithm itself, so the pin would sit apart
+  # from fleet/known_hosts and could drift from it. ssh's stderr is not printed (see
+  # fleet/pinned-ssh.sh); only the exit code and a host-key verdict are.
   check-disk:
     needs: load-inventory
     runs-on: ubuntu-latest
@@ -134,19 +144,40 @@ jobs:
         host: ${{ fromJson(needs.load-inventory.outputs.hosts) }}
     name: check-disk (${{ matrix.host.id }})
     steps:
-      - name: Check ${{ matrix.host.id }} disk
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
-        env:
-          THRESHOLD: ${{ matrix.host.disk_threshold || 85 }}
+      - uses: actions/checkout@v5
         with:
-          host: ${{ secrets[format('{0}_VPS_HOST', matrix.host.ssh_secret_prefix)] }}
-          username: ${{ secrets[format('{0}_VPS_USERNAME', matrix.host.ssh_secret_prefix)] }}
-          key: ${{ secrets[format('{0}_VPS_SSH_KEY', matrix.host.ssh_secret_prefix)] }}
-          envs: THRESHOLD
-          script: |
-            USAGE=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
-            echo "Host disk: ${USAGE}% (threshold ${THRESHOLD}%)"
-            [ "$USAGE" -ge "$THRESHOLD" ] && { echo "THRESHOLD_EXCEEDED"; exit 1; } || true
+          sparse-checkout: fleet
+
+      - name: Check ${{ matrix.host.id }} disk
+        env:
+          HOST_ID: ${{ matrix.host.id }}
+          THRESHOLD: ${{ matrix.host.disk_threshold || 85 }}
+          SSH_HOST: ${{ secrets[format('{0}_VPS_HOST', matrix.host.ssh_secret_prefix)] }}
+          SSH_USER: ${{ secrets[format('{0}_VPS_USERNAME', matrix.host.ssh_secret_prefix)] }}
+          SSH_KEY: ${{ secrets[format('{0}_VPS_SSH_KEY', matrix.host.ssh_secret_prefix)] }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_KEY" ]; then
+            echo "::error::${HOST_ID}: SSH secrets not configured"; exit 1
+          fi
+          source fleet/pinned-ssh.sh
+          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/key"
+          chmod 600 "$RUNNER_TEMP/key"
+          pinned_ssh_opts "$HOST_ID" "$RUNNER_TEMP/key"
+          rc=0
+          USAGE=$(ssh "${PINNED_SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+                    "df / | awk 'NR==2 {print \$5}' | tr -d '%'" 2> "$RUNNER_TEMP/ssh.err") || rc=$?
+          krc=0
+          pinned_ssh_check "$HOST_ID" "$rc" "$RUNNER_TEMP/ssh.err" || krc=$?
+          [ "$krc" -eq 2 ] && exit 1
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::${HOST_ID}: SSH failed (exit ${rc})"; exit 1
+          fi
+          case "$USAGE" in
+            ''|*[!0-9]*) echo "::error::${HOST_ID}: could not read disk usage"; exit 1 ;;
+          esac
+          echo "Host disk: ${USAGE}% (threshold ${THRESHOLD}%)"
+          if [ "$USAGE" -ge "$THRESHOLD" ]; then echo "THRESHOLD_EXCEEDED"; exit 1; fi
 
   # ── Stale in-progress jobs (>60 min) across known repos ──────────────────
   check-stale-jobs:
@@ -233,7 +264,7 @@ jobs:
             MESSAGE="${MESSAGE}CRITICAL - Runner(s) OFFLINE: ${LIST}\nAuto-restart firing.\n\n"
           fi
           if [ "$DISK_WARNING" = "true" ]; then
-            MESSAGE="${MESSAGE}WARNING - Disk over threshold (or SSH unreachable) on a fleet host - see the check-disk legs of this run\n\n"
+            MESSAGE="${MESSAGE}WARNING - Disk over threshold (or SSH unreachable, or host key mismatch) on a fleet host - see the check-disk legs of this run\n\n"
           fi
           if [ -n "$STALE_COUNT" ] && [ "$STALE_COUNT" != "0" ]; then
             MESSAGE="${MESSAGE}WARNING - ${STALE_COUNT} stale run(s) (>60min):\n${STALE_SUMMARY}\n\n"

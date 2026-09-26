@@ -26,16 +26,16 @@ name: Fleet Inventory
 #
 # Domains: fleet/inventory.yml `domains[]`.
 #
-# Plain `ssh` rather than appleboy/ssh-action (used by runner-health.yml): that action
-# streams the remote output into the public log, and the output here contains IPs.
+# Plain `ssh`, never appleboy/ssh-action: that action streams the remote output into
+# the public log, and the output here contains IPs.
 #
-# HOST KEYS ARE NOT VERIFIED. Each run starts with an empty known_hosts
-# (StrictHostKeyChecking=accept-new against a per-run file), so whatever key the
-# server presents is accepted: this is zero host-key verification, not trust-on-first-
-# use. Acceptable for a read-only poll -- a man-in-the-middle could feed this report
-# false facts, but the collector writes nothing and sends nothing beyond the SSH
-# session itself. Pinning host keys (e.g. a <PREFIX>_VPS_HOST_KEY secret) is a
-# follow-up.
+# HOST KEYS ARE PINNED (OPS-33). Every host's ED25519 key is committed in
+# fleet/known_hosts under its inventory id (not its address), and ssh runs with
+# HostKeyAlias=<id> + StrictHostKeyChecking=yes against that file only
+# (fleet/pinned-ssh.sh). A host with no pinned key is not connected to, and one that
+# presents a different key fails its collect leg with a HOST KEY VERIFICATION FAILED
+# error (status no_pinned_key / host_key_mismatch in the report); the report job
+# still runs. Re-pinning is a PR: docs/RUNBOOK.md, "Host key changed".
 
 on:
   schedule:

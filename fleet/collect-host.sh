@@ -6,9 +6,12 @@
 # Output: out/<HOST_ID>.json            public facts (no IPs, ports, images, server_names)
 #         out/fleet-full-<HOST_ID>.json.gpg   full facts, only if GPG_PUBKEY is set
 #
-# Always exits 0 once it has written the public JSON: an unconfigured or unreachable
-# host is a reported fact, not a failed leg. Nothing here prints the raw collector
-# output; every discovered IP is masked before any line that could contain one.
+# Exits 0 once it has written the public JSON: an unconfigured or unreachable host is
+# a reported fact, not a failed leg. The exception is the host key (OPS-33): a host
+# with no pinned key in fleet/known_hosts, or one presenting a different key, still
+# gets its JSON (status no_pinned_key / host_key_mismatch) but fails the leg, loudly.
+# Nothing here prints the raw collector output; every discovered IP is masked before
+# any line that could contain one.
 
 set -euo pipefail
 
@@ -37,18 +40,28 @@ while IFS= read -r ip; do
   [ -n "$ip" ] && echo "::add-mask::${ip}"
 done < <(getent ahosts "$SSH_HOST" 2>/dev/null | awk '{print $1}' | sort -u)
 
+# Host key pinned in fleet/known_hosts under this host id (fleet/pinned-ssh.sh).
+# shellcheck source=fleet/pinned-ssh.sh
+source "${HERE}/pinned-ssh.sh"
 printf '%s\n' "$SSH_KEY" > "$WORK/key"
 chmod 600 "$WORK/key"
-SSH_OPTS=(-i "$WORK/key" -o BatchMode=yes -o ConnectTimeout=20
-          -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$WORK/known_hosts"
-          -o LogLevel=ERROR)
+if ! pinned_ssh_opts "$HOST_ID" "$WORK/key"; then
+  $FACTS failed --id "$HOST_ID" --status no_pinned_key > "${OUT}/${HOST_ID}.json"
+  exit 1
+fi
 SSH_CMD="${SSH_CMD:-ssh}"   # overridable for local testing only
 
 # ssh's stderr is never printed: its messages can carry addresses the masks above
-# do not cover. Only the exit code is reported.
+# do not cover. Only the exit code (and a host-key verdict) is reported.
 rc=0
-$SSH_CMD "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" 'bash -s' \
+$SSH_CMD "${PINNED_SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" 'bash -s' \
   < "${HERE}/collect-facts.sh" > "$WORK/raw.txt" 2> "$WORK/ssh.err" || rc=$?
+krc=0
+pinned_ssh_check "$HOST_ID" "$rc" "$WORK/ssh.err" || krc=$?
+if [ "$krc" -eq 2 ]; then
+  $FACTS failed --id "$HOST_ID" --status host_key_mismatch > "${OUT}/${HOST_ID}.json"
+  exit 1
+fi
 if [ "$rc" -ne 0 ]; then
   echo "${HOST_ID}: SSH failed (exit ${rc})"
   echo "::warning::${HOST_ID}: unreachable over SSH (exit ${rc})"
