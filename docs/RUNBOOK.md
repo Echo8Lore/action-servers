@@ -70,8 +70,9 @@ Then confirm the runner that was holding it is online (restart if not).
 - **Runner registration tokens** are short-lived (≈1h) — mint fresh each time.
 - **`RUNNER_HEALTH_PAT`** (admin scope on org + personal repos) powers the monitor and
   restart-verify. Rotate by issuing a new PAT and updating the secret on this repo.
-- **`DEVOPS_VPS_*`** secrets are the SSH path the monitor/restart use to reach the
-  primary host. Rotate the key on the host and update `DEVOPS_VPS_SSH_KEY`.
+- **`<PREFIX>_VPS_*`** secrets are the SSH path the monitor/restart/inventory use to
+  reach each host: `DEVOPS` (ovh-staging), `DEVOPS001` (ovh-devops-001), `HOSTING`
+  (hosting-vps). Rotate the key on the host and update that prefix's `_VPS_SSH_KEY`.
 - Per-project deploy secrets (`VPS_*`, `DEPLOY_ENV_JSON`) live on each project repo.
 
 ## Deploys
@@ -91,6 +92,9 @@ Then confirm the runner that was holding it is online (restart if not).
   inventory with its own `ssh_secret_prefix`, and add the matching `<PREFIX>_VPS_*`
   secrets. The monitor's disk check and auto-restart pick each host's secret set from
   its prefix automatically; manual restarts take it as the `ssh_secret_prefix` input.
+- **Poll-only hosts:** a `hosts:` entry doesn't need runners. `hosting-vps` (the web
+  host) is polled for facts and disk but never carries runners (OPS-17); a runner unit
+  found there shows up as `extra` drift in the fleet-inventory report.
 - **Cost note:** all CI on self-hosted runners ≈ the VPS bill only; GitHub-hosted
-  minutes are spent solely by the monitor/restart jobs (`ubuntu-latest`), which are
+  minutes are spent solely by the monitor/restart/inventory/watchdog jobs (`ubuntu-latest`), which are
   cheap and infrequent.

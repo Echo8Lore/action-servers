@@ -9,7 +9,8 @@ both **org** repos (`Echo8Lore/*`) and **personal** repos.
 - A token source with admin scope on the org + your personal repos. A fine-grained PAT
   or a GitHub App works; the `gh` CLI authenticated as you is simplest for 2 owners.
 - Fleet secrets configured on **this** (`action-servers`) repo for the monitor:
-  `RUNNER_HEALTH_PAT`, `DEVOPS_VPS_HOST`, `DEVOPS_VPS_USERNAME`, `DEVOPS_VPS_SSH_KEY`,
+  `RUNNER_HEALTH_PAT`, one `<PREFIX>_VPS_HOST` / `_USERNAME` / `_SSH_KEY` triple per
+  `hosts:` entry in `fleet/inventory.yml` (today `DEVOPS`, `DEVOPS001`, `HOSTING`),
   and `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for alerts (without them the monitor
   runs but cannot alert).
 
