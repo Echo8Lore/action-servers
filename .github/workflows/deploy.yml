@@ -197,16 +197,19 @@ jobs:
 
       # The caller's checkout doesn't have ops/, so fetch the notifier from this public
       # repo (same pattern as runner-restart.yml): one sender, one token-hygiene
-      # implementation. main, not the caller's @v1: the script's interface (stdin + two
-      # env vars, exit 0/2/3) is stable, and main is what the fleet monitors run.
+      # implementation. job.workflow_sha is the commit of the workflow file defining
+      # this job, i.e. the action-servers commit the caller resolved (e.g. @v1), so
+      # the script matches the workflow. If it is empty at runtime, checkout falls
+      # back to the default branch.
       - uses: actions/checkout@v5
         if: steps.cfg.outputs.configured == 'true'
         continue-on-error: true
         with:
           repository: Echo8Lore/action-servers
-          ref: main
+          ref: ${{ job.workflow_sha }}
           sparse-checkout: ops
           path: .action-servers
+          persist-credentials: false
 
       - name: Telegram notify
         if: steps.cfg.outputs.configured == 'true'
