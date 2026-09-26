@@ -79,7 +79,8 @@ Then set these **secrets** on the project repo (or inherit org-level ones):
 | `VPS_USERNAME` | SSH user |
 | `PRODUCTION_URL` | (optional) base URL for the health check |
 | `DEPLOY_ENV_JSON` | (optional) JSON object written to `.env` on first deploy, e.g. `{"NODE_ENV":"production","PORT":"3000"}` |
-| `SLACK_WEBHOOK_URL` | (optional) deploy notifications |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | (optional) deploy success/failure message via Hermes's bot (`ops/notify-telegram.sh`, `sendMessage` only). If either is missing the notify job skips with a notice |
+| `SLACK_WEBHOOK_URL` | **Deprecated, ignored** (OPS-35). Still accepted so callers that pass it explicitly don't break; remove it from your caller |
 
 > Because `action-servers` is public, `uses: <you>/action-servers/...@v1` resolves from
 > repos under **either** owner. Pin to a tag (`@v1`) so projects aren't broken by infra

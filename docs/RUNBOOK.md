@@ -80,6 +80,9 @@ Then confirm the runner that was holding it is online (restart if not).
 - Normal path: push to `main` → project's `deploy.yml` calls the reusable workflow.
 - Manual: `Actions → Deploy → Run workflow`.
 - Local fallback: `./deploy/deploy.sh` (config-driven; `--dry-run` to preview).
+- Notification: the reusable workflow's `notify` job sends one Telegram message (success
+  or failure) when the caller passes `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`; without
+  them it skips with a notice. It never fails the deploy.
 - **Rollback is code-only**: re-deploy a previous commit/tag. The deploy tags the prior
   image `:rollback` before recreating. DB migrations are forward-only — a code rollback
   does not revert schema.

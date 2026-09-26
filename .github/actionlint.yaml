@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+    # queue-watchdog-selftest.yml queues a job on this label ON PURPOSE (no runner
+    # carries it), to prove the watchdog pages. Declared so actionlint stays clean.
+    - queue-watchdog-selftest-no-such-runner
