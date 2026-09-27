@@ -6,7 +6,8 @@ Run from the repo root:  python3 -m unittest discover -s ops -v
 Cases: first page; same condition within 6 h suppressed; condition changed pages;
 6 h repeat; resolved (once); test_alert bypass; a failed send does not adopt the state
 (decide never writes STATE, and the workflow adopts NEW only after notify-telegram.sh
-exits 0); keys ignore prose and counts.
+exits 0); keys ignore prose and counts; per-host disk keys from the jobs API legs
+(OPS-45), a second host crossing pages at once, API failure falls back to one "disk" key.
 """
 
 import datetime as dt
@@ -56,6 +57,82 @@ class Keys(unittest.TestCase):
         self.assertEqual(a, ad.fingerprint(["disk", "offline:r1"]))
         self.assertNotEqual(a, ad.fingerprint(["disk"]))
         self.assertEqual(ad.fingerprint([]), "")
+
+
+def leg(host, step):
+    return json.dumps({"name": f"check-disk ({host})", "step": step})
+
+
+LEGS = "\n".join([leg("ovh-staging", "Disk under threshold"),
+                   leg("hosting-vps", "SSH reachable"),
+                   leg("ovh-devops-001", "Host key matches fleet/known_hosts")]) + "\n"
+
+
+class DiskLegs(unittest.TestCase):
+    def test_parse_classifies_by_failed_step(self):
+        self.assertEqual(ad.parse_disk_legs(LEGS), [("hosting-vps", "ssh"),
+                                                    ("ovh-devops-001", "hostkey"),
+                                                    ("ovh-staging", "disk")])
+
+    def test_parse_unknown_step_and_bare_names(self):
+        text = leg("a", "Probe a disk") + "\n" + leg("b", "") + "\ncheck-disk (c)\n"
+        self.assertEqual(ad.parse_disk_legs(text), [("a", "unknown"), ("b", "unknown"),
+                                                    ("c", "unknown")])
+
+    def test_parse_unusable_is_none(self):
+        for text in (None, "", "\n", "junk\n", '{"name": "alert"}\n', "check-disk ()\n",
+                     '{"name": 5}\n[1]\n'):
+            self.assertIsNone(ad.parse_disk_legs(text), text)
+
+    def test_per_host_keys(self):
+        keys = ad.condition_keys(disk="true", disk_legs=ad.parse_disk_legs(LEGS))
+        self.assertEqual(keys, ["disk-hostkey:ovh-devops-001", "disk-ssh:hosting-vps",
+                                "disk:ovh-staging"])
+        # An unknown failing step still names the host, under the plain disk key.
+        self.assertEqual(ad.condition_keys(disk="true", disk_legs=[("a", "unknown")]),
+                         ["disk:a"])
+
+    def test_legs_ignored_unless_check_disk_failed(self):
+        self.assertEqual(ad.condition_keys(disk="false", disk_legs=ad.parse_disk_legs(LEGS)), [])
+        self.assertEqual(ad.disk_message("false", ad.parse_disk_legs(LEGS)), "")
+
+    def test_api_failure_falls_back_to_one_disk_key(self):
+        # No legs file (gh api failed), or it listed nothing usable: degraded, not silent.
+        for legs in (None, []):
+            self.assertEqual(ad.condition_keys(disk="true", disk_legs=legs), ["disk"])
+            self.assertEqual(ad.disk_message("true", legs), ad.DISK_FALLBACK)
+
+    def test_message_names_hosts_per_cause(self):
+        msg = ad.disk_message("true", ad.parse_disk_legs(LEGS + leg("x-host", "Disk under threshold")))
+        self.assertIn("Disk over threshold on: ovh-staging, x-host", msg)
+        self.assertIn("SSH unreachable (or secrets missing), disk not checked, on: hosting-vps", msg)
+        self.assertIn("HOST KEY MISMATCH (or no pinned key), disk not checked, on: ovh-devops-001", msg)
+        self.assertNotIn("cause not reported", msg)
+
+    def test_keys_carry_no_usage(self):
+        # Fingerprint = keys only: usage % and threshold never enter a key.
+        keys = ad.condition_keys(disk="true", disk_legs=ad.parse_disk_legs(leg("h", "Disk under threshold")))
+        self.assertEqual(keys, ["disk:h"])
+
+    def test_second_host_crossing_pages_immediately(self):
+        one = ad.condition_keys(disk="true", disk_legs=[("ovh-staging", "disk")])
+        _, _, st = ad.decide({}, one, "m1", T0)
+        self.assertEqual(ad.decide(st, one, "m1", later(30))[0], "suppress")
+        two = ad.condition_keys(disk="true", disk_legs=[("hosting-vps", "disk"), ("ovh-staging", "disk")])
+        action, text, _ = ad.decide(st, two, "m2", later(30))
+        self.assertEqual((action, text), ("page", "m2"))
+
+    def test_cause_change_on_same_host_pages(self):
+        _, _, st = ad.decide({}, ["disk-ssh:h"], "m", T0)
+        self.assertEqual(ad.decide(st, ["disk:h"], "m", later(30))[0], "page")
+
+    def test_steps_match_workflow(self):
+        # DISK_STEPS names must be the check-disk job's step names.
+        text = RUNNER_HEALTH.read_text()
+        job = text[text.index("\n  check-disk:\n"):text.index("\n  check-stale-jobs:")]
+        for name in ad.DISK_STEPS:
+            self.assertIn(f"      - name: {name}\n", job)
+        self.assertIn("name: check-disk (${{ matrix.host.id }})", job)
 
 
 class Decide(unittest.TestCase):
@@ -155,11 +232,51 @@ class Main(unittest.TestCase):
         self.assertEqual(old, {})
         self.assertTrue(new["fingerprint"])
 
+    def test_disk_legs_file_and_fallback(self):
+        d = pathlib.Path(self.tmp.name)
+        (d / "legs").write_text(LEGS)
+        want = ad.fingerprint(["disk-hostkey:ovh-devops-001", "disk-ssh:hosting-vps",
+                               "disk:ovh-staging"])
+        _, new, _ = self.run_main({}, disk="true", disk_legs=str(d / "legs"))
+        self.assertEqual(new["fingerprint"], want)
+        # Missing file (the workflow deletes it when gh api fails): one "disk" key.
+        _, new, _ = self.run_main({}, disk="true", disk_legs=str(d / "missing"))
+        self.assertEqual(new["fingerprint"], ad.fingerprint(["disk"]))
+
+    def test_disk_message_command(self):
+        d = pathlib.Path(self.tmp.name)
+        (d / "legs").write_text(leg("hosting-vps", "Disk under threshold"))
+        with unittest.mock.patch("builtins.print") as pr:
+            self.assertEqual(ad.main(["disk-message", "--disk", "true", "--legs", str(d / "legs")]), 0)
+        self.assertIn("Disk over threshold on: hosting-vps", pr.call_args[0][0])
+        with unittest.mock.patch("builtins.print") as pr:
+            ad.main(["disk-message", "--disk", "true", "--legs", str(d / "missing")])
+        self.assertEqual(pr.call_args[0][0], ad.DISK_FALLBACK)
+
     def test_suppressed_writes_empty_out(self):
         st = {"fingerprint": ad.fingerprint(["offline:r1"]), "paged_at": "2026-09-27T11:30:00Z"}
         out, new, _ = self.run_main(st, any_offline="true", offline_runners='["r1"]')
         self.assertEqual(out, "")
         self.assertEqual(new, st)
+
+
+class DiskFailClosed(unittest.TestCase):
+    """The split check-disk leg must fail on any Probe status other than 'ok': an empty
+    or unexpected status reaches 'SSH reachable', and only 'ok' reaches the disk step."""
+
+    def disk_steps(self):
+        text = RUNNER_HEALTH.read_text()
+        start = text.index("      - name: SSH reachable\n")
+        end = text.index("\n  check-stale-jobs:", start)
+        return text[start:end]
+
+    def test_ssh_reachable_guard_is_not_ok(self):
+        block = self.disk_steps().split("      - name: Disk under threshold", 1)[0]
+        self.assertIn("if: steps.probe.outputs.status != 'ok'", block)
+
+    def test_disk_step_is_unconditional(self):
+        block = self.disk_steps().split("      - name: Disk under threshold", 1)[1]
+        self.assertNotIn("\n        if:", block)
 
 
 class Wiring(unittest.TestCase):
@@ -188,6 +305,16 @@ class Wiring(unittest.TestCase):
         guarded = job[send:adopt[0]]
         self.assertIn('if [ "$rc" -eq 0 ]', guarded)
         self.assertIn("--test-alert \"$TEST_ALERT\"", job)
+
+    def test_disk_legs_from_jobs_api_with_fallback(self):
+        job = self.alert_job()
+        self.assertIn("GH_TOKEN: ${{ github.token }}", job)
+        self.assertIn('gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs', job)
+        self.assertIn('select(.name | startswith("check-disk ("))', job)
+        self.assertIn('rm -f "$DISK_LEGS"', job)          # API failure -> no file -> "disk"
+        self.assertIn('--disk-legs "$DISK_LEGS"', job)
+        perms = RUNNER_HEALTH.read_text().split("\npermissions:\n", 1)[1].split("\n\n", 1)[0]
+        self.assertRegex(perms, r"actions: (read|write)")
 
     def test_restart_quiet_flag_from_runner_health(self):
         self.assertIn("quiet_unless_online: true", RUNNER_HEALTH.read_text())

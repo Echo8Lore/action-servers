@@ -7,15 +7,21 @@ then asks this helper whether to send it:
 
   alert_dedupe.py decide --state STATE.json --new-state NEW.json \
       --message MSG.txt --out SEND.txt --run-url URL \
-      [--any-offline true] [--offline-runners JSON] [--disk true] \
+      [--any-offline true] [--offline-runners JSON] [--disk true] [--disk-legs LEGS] \
       [--stale-count N] [--stale-summary TEXT] [--scheduler-keys TEXT] \
       [--incomplete true] [--test-alert true] [--repeat-min 360]
 
 The fingerprint is sha256 over the SORTED condition keys, never the prose, so wording,
 counts and timestamps in the message don't re-page:
   offline:<runner>                                one per offline runner
-  disk                                            any check-disk leg failed (the matrix
-                                                  gives the alert job no per-host result)
+  disk:<host>                                     that host's disk is over its threshold
+                                                  (or its leg failed at an unknown step)
+  disk-ssh:<host>                                 disk not checked: SSH failed, secrets
+                                                  missing, or usage unreadable
+  disk-hostkey:<host>                             disk not checked: host key mismatch or
+                                                  no pinned key (never connected)
+  disk                                            FALLBACK: a check-disk leg failed but the
+                                                  failed legs could not be listed (OPS-45)
   stale:<summary line>                            one per listed stale run (repo, name,
                                                   start time: stable while it is stuck)
   scheduler:<level>:<workflow>:<quiet slots>      from dispatch_liveness.py --keys (the
@@ -33,6 +39,17 @@ Decision:
   --test-alert                                 -> a message with keys is sent regardless
                                                   (the run's purpose is to prove paging)
 
+Per-host disk keys (OPS-45). The alert job sees only check-disk's overall matrix
+result, so it lists the run's failed check-disk legs from the jobs API into LEGS, one
+JSON object per line, {"name": "check-disk (<host>)", "step": "<first failed step>"}
+(a bare leg name per line is accepted too, cause unknown). The failing step's NAME is
+the cause: each check-disk leg probes first and then fails in exactly one of the steps
+named in DISK_STEPS, which must match runner-health.yml. If --disk is true but LEGS is
+missing (the API call failed), unreadable or lists no failed leg, the single "disk" key
+and the old generic line are used: degraded, never silent.
+
+  alert_dedupe.py disk-message --disk true --legs LEGS   -> the message's disk lines
+
 SEND.txt is written empty when nothing should be sent. STATE is only read; the new
 state goes to NEW.json, and the workflow adopts it only after Telegram accepted the
 message, so a failed send pages again next run.
@@ -45,9 +62,26 @@ import datetime as dt
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 REPEAT_MIN = 360
+# check-disk step name -> cause. Keep in sync with runner-health.yml's check-disk job.
+DISK_STEPS = {
+    "Disk under threshold": "disk",
+    "SSH reachable": "ssh",
+    "Host key matches fleet/known_hosts": "hostkey",
+}
+DISK_KEY_PREFIX = {"disk": "disk", "unknown": "disk", "ssh": "disk-ssh", "hostkey": "disk-hostkey"}
+DISK_LINES = [   # (cause, message prefix); one line per cause, hosts listed
+    ("disk", "WARNING - Disk over threshold on: "),
+    ("hostkey", "WARNING - HOST KEY MISMATCH (or no pinned key), disk not checked, on: "),
+    ("ssh", "WARNING - SSH unreachable (or secrets missing), disk not checked, on: "),
+    ("unknown", "WARNING - check-disk failed (cause not reported) on: "),
+]
+DISK_FALLBACK = ("WARNING - Disk over threshold (or SSH unreachable, or host key mismatch) "
+                 "on a fleet host - see the check-disk legs of this run")
+LEG_NAME = re.compile(r"^check-disk \((.+)\)$")
 RESOLVED = "RESOLVED - fleet healthy: every condition from the last page has cleared."
 
 
@@ -59,8 +93,50 @@ def truthy(s):
     return str(s).strip().lower() == "true"
 
 
+def parse_disk_legs(text):
+    """LEGS file text -> sorted [(host, cause)], or None when unusable (no file, or
+    nothing that names a check-disk leg). cause is disk | ssh | hostkey | unknown."""
+    if text is None:
+        return None
+    legs = set()
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except ValueError:
+            obj = ln
+        if isinstance(obj, str):
+            name, step = obj, ""
+        elif isinstance(obj, dict) and isinstance(obj.get("name"), str):
+            name, step = obj["name"], obj.get("step")
+        else:
+            continue
+        m = LEG_NAME.match(name.strip())
+        if not m or not m.group(1).strip():
+            continue
+        cause = DISK_STEPS.get(step.strip(), "unknown") if isinstance(step, str) else "unknown"
+        legs.add((m.group(1).strip(), cause))
+    return sorted(legs) or None
+
+
+def disk_message(disk, legs):
+    """-> the alert's disk lines ("" when check-disk did not fail)."""
+    if not truthy(disk):
+        return ""
+    if not legs:
+        return DISK_FALLBACK
+    lines = []
+    for cause, prefix in DISK_LINES:
+        hosts = [h for h, c in legs if c == cause]
+        if hosts:
+            lines.append(prefix + ", ".join(hosts))
+    return "\n".join(lines) + "\nSee the check-disk legs of this run."
+
+
 def condition_keys(any_offline="", offline_runners="", disk="", stale_count="",
-                   stale_summary="", scheduler_keys=""):
+                   stale_summary="", scheduler_keys="", disk_legs=None):
     keys = set()
     if truthy(any_offline):
         try:
@@ -73,7 +149,8 @@ def condition_keys(any_offline="", offline_runners="", disk="", stale_count="",
         if not any(k.startswith("offline:") for k in keys):
             keys.add("offline:?")
     if truthy(disk):
-        keys.add("disk")
+        # Per host when the failed legs could be listed; otherwise one "disk" key.
+        keys |= {f"{DISK_KEY_PREFIX[c]}:{h}" for h, c in (disk_legs or [])} or {"disk"}
     if str(stale_count).strip() not in ("", "0"):
         # The summary joins lines with a literal "\n" (jq join("\\n")); accept both.
         lines = [ln.strip() for part in (stale_summary or "").split("\\n")
@@ -124,6 +201,16 @@ def decide(state, keys, message, now, run_url="", repeat_min=REPEAT_MIN,
     return "none", "", state
 
 
+def read_optional(path):
+    """File text, or None when no path was given or it cannot be read."""
+    if not path:
+        return None
+    try:
+        return pathlib.Path(path).read_text()
+    except OSError:
+        return None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -136,13 +223,23 @@ def main(argv=None):
     p.add_argument("--any-offline", default="")
     p.add_argument("--offline-runners", default="")
     p.add_argument("--disk", default="")
+    p.add_argument("--disk-legs", default="")
     p.add_argument("--stale-count", default="")
     p.add_argument("--stale-summary", default="")
     p.add_argument("--scheduler-keys", default="")
     p.add_argument("--incomplete", default="")
     p.add_argument("--test-alert", default="")
     p.add_argument("--repeat-min", type=int, default=REPEAT_MIN)
+    m = sub.add_parser("disk-message")
+    m.add_argument("--disk", default="")
+    m.add_argument("--legs", default="")
     a = ap.parse_args(argv)
+
+    if a.cmd == "disk-message":
+        text = disk_message(a.disk, parse_disk_legs(read_optional(a.legs)))
+        if text:
+            print(text)
+        return 0
 
     try:
         state = json.loads(pathlib.Path(a.state).read_text())
@@ -153,12 +250,14 @@ def main(argv=None):
     except OSError:
         message = ""
     keys = condition_keys(a.any_offline, a.offline_runners, a.disk, a.stale_count,
-                          a.stale_summary, a.scheduler_keys)
+                          a.stale_summary, a.scheduler_keys,
+                          parse_disk_legs(read_optional(a.disk_legs)))
     action, text, new_state = decide(state, keys, message, now_utc(), a.run_url,
                                      a.repeat_min, truthy(a.test_alert), truthy(a.incomplete))
     pathlib.Path(a.out).write_text(text)
     pathlib.Path(a.new_state).write_text(json.dumps(new_state, sort_keys=True))
-    # Keys can hold runner names and stale-run names; both already appear in this log.
+    # Keys can hold runner names, host ids and stale-run names; all already appear in
+    # this log.
     print(f"alert dedupe: {action} ({len(keys)} condition key(s))")
     return 0
 
