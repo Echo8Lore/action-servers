@@ -15,6 +15,11 @@ hosts:
   - id: devops-vps
     ssh_secret_prefix: DEVOPS     # -> DEVOPS_VPS_HOST / _USERNAME / _SSH_KEY secrets
     disk_threshold: 85            # percent; monitor warns above this
+    # role: ci                    # optional. fleet-inventory compares apt-mark showmanual
+                                  # between hosts of the same role (package parity).
+                                  # Default: "ci" if any runner below is on this host,
+                                  # else none -- a host with no role is not compared and
+                                  # publishes no package names (e.g. a web host).
 
 # Extra repos the queue watchdog scans for jobs stuck in the queue, beyond those implied
 # by runners[] (repo targets + all repos of an org target).

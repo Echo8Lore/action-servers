@@ -5,7 +5,10 @@ Subcommands (stdlib only; runs on ubuntu-latest's python3):
 
   parse    RAW            -> FULL json   (everything collect-facts.sh printed, IPs included)
   ips      FULL           -> one IP per line (the workflow ::add-mask::s each of these)
-  public   FULL ...       -> PUBLIC json (no IPs, ports, images or server_name lists)
+  public   FULL ...       -> PUBLIC json (no IPs, ports, images or server_name lists;
+                            apt package names only with a --role, see below)
+  hosts    INVENTORY      -> inventory hosts[] as JSON, each with its parity "role"
+                            (the collect matrix; empty role = not compared)
   missing  --id ID ...    -> PUBLIC json for a host whose secrets are not set
   failed   --id ID ...    -> PUBLIC json for a configured host that SSH could not reach
   report   INVENTORY DIR  -> fleet-report.json + markdown summary (drift + domain map
@@ -252,7 +255,7 @@ def as_dict(x):
     return x if isinstance(x, dict) else {}
 
 
-def make_public(full, host_id, target, domains, records_for=domain_records):
+def make_public(full, host_id, target, domains, records_for=domain_records, role=""):
     full = as_dict(full)
     host_ips = set()
     for ip in full.get("ips") if isinstance(full.get("ips"), list) else []:
@@ -297,12 +300,21 @@ def make_public(full, host_id, target, domains, records_for=domain_records):
                           "port_count": len(port_list) if state_of(ports) == "present" else None},
         "public_ip_counts": {"ipv4": v4, "ipv6": len(public_ips) - v4},
         "domains": doms,
-        # Package names are published (they are what the parity check compares, and
-        # say nothing about where a host is); versions are not collected at all.
-        "apt_manual": ({"state": "present", "packages": package_names(p for p in apt_pkgs if isinstance(p, str))}
-                       if state_of(apt) == "present" and apt_pkgs is not None
-                       else {"state": "absent", "reason": apt.get("reason") or "not collected"}),
+        "apt_manual": public_apt(apt, apt_pkgs, role),
     }
+
+
+def public_apt(apt, pkgs, role):
+    """Package names travel in the (1-day) per-host artifact only for a host in a parity
+    role, because the report job needs them to compare. A host with no role
+    (hosting-vps, the internet-facing one) publishes none: a full package list is a
+    recon map. The report itself keeps only counts plus the differences."""
+    if state_of(apt) != "present" or pkgs is None:
+        return {"state": "absent", "reason": apt.get("reason") or "not collected"}
+    names = package_names(p for p in pkgs if isinstance(p, str))
+    if not role:
+        return {"state": "not_compared", "package_count": len(names)}
+    return {"state": "present", "packages": names}
 
 
 # ── report ───────────────────────────────────────────────────────────────────
@@ -358,6 +370,13 @@ def host_roles(inventory):
     return roles
 
 
+def matrix_hosts(inventory):
+    """inventory hosts[] for the collect matrix, each with its derived role ("" = none)."""
+    roles = host_roles(inventory)
+    return [dict(h, role=roles.get(h.get("id")) or "") for h in inventory.get("hosts") or []
+            if isinstance(h, dict)]
+
+
 def host_packages(h):
     """(set of package names, None) or (None, reason it cannot be compared)."""
     if h.get("status") != "ok":
@@ -365,7 +384,7 @@ def host_packages(h):
     apt = as_dict(h.get("apt_manual"))
     pkgs = apt.get("packages")
     if apt.get("state") != "present" or not isinstance(pkgs, list):
-        return None, f"apt_manual {apt.get('reason') or 'not collected'}"
+        return None, f"apt_manual {apt.get('reason') or apt.get('state') or 'not collected'}"
     return {p for p in pkgs if isinstance(p, str)}, None
 
 
@@ -536,12 +555,31 @@ def load_host_files(hostdir):
     return found
 
 
+def report_host(h):
+    """The host as the 30-day report shows it: apt_manual cut down to a count. Package
+    names reach the report only through package_parity[].differences."""
+    if "apt_manual" not in h:
+        return h
+    apt = as_dict(h.get("apt_manual"))
+    pkgs = apt.get("packages")
+    out = {"state": apt.get("state") if isinstance(apt.get("state"), str) else "absent"}
+    if isinstance(pkgs, list):
+        out["package_count"] = len(pkgs)
+    elif isinstance(apt.get("package_count"), int):
+        out["package_count"] = apt["package_count"]
+    if isinstance(apt.get("reason"), str):
+        out["reason"] = apt["reason"]
+    return dict(h, apt_manual=out)
+
+
 def build_report(inv, hostdir, records_for=domain_records):
     found = load_host_files(hostdir)
     hosts = [found.get(h["id"], {"id": h["id"], "status": "no_result"}) for h in inv.get("hosts", [])]
+    parity = package_parity(inv, hosts)
+    hosts = [report_host(h) for h in hosts]
     report = {"generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "hosts": hosts, "domains": domain_map(inv.get("domains") or [], hosts, records_for),
-              "drift": drift(inv, hosts), "package_parity": package_parity(inv, hosts)}
+              "drift": drift(inv, hosts), "package_parity": parity}
     report["warnings"] = warnings(report)
     return report
 
@@ -554,6 +592,8 @@ def main(argv=None):
     p = sub.add_parser("ips"); p.add_argument("full")
     p = sub.add_parser("public"); p.add_argument("full"); p.add_argument("--id", required=True)
     p.add_argument("--target", default=""); p.add_argument("--domains", default="")
+    p.add_argument("--role", default="")
+    p = sub.add_parser("hosts"); p.add_argument("inventory")
     p = sub.add_parser("missing"); p.add_argument("--id", required=True); p.add_argument("--secrets", default="")
     p = sub.add_parser("failed"); p.add_argument("--id", required=True); p.add_argument("--status", required=True)
     p = sub.add_parser("report"); p.add_argument("inventory"); p.add_argument("hostdir")
@@ -576,7 +616,11 @@ def main(argv=None):
     elif a.cmd == "public":
         full = json.loads(pathlib.Path(a.full).read_text())
         doms = [d for d in a.domains.split(",") if d.strip()]
-        json.dump(make_public(full, a.id, a.target, [d.strip() for d in doms]), sys.stdout, indent=1)
+        json.dump(make_public(full, a.id, a.target, [d.strip() for d in doms], role=a.role),
+                  sys.stdout, indent=1)
+    elif a.cmd == "hosts":
+        inv = json.loads(pathlib.Path(a.inventory).read_text())
+        json.dump(matrix_hosts(inv), sys.stdout, separators=(",", ":"))
     elif a.cmd == "missing":
         json.dump({"id": a.id, "status": "not_configured",
                    "missing_secrets": [x for x in a.secrets.split(",") if x]}, sys.stdout, indent=1)
