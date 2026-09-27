@@ -175,9 +175,9 @@ class Wiring(unittest.TestCase):
     def test_cache_and_concurrency(self):
         job = self.alert_job()
         self.assertRegex(job, r"concurrency:\s*\n\s+group: runner-health-alert\s*\n\s+cancel-in-progress: false")
-        self.assertIn("actions/cache/restore@v4", job)
+        self.assertIn("actions/cache/restore@v5", job)
         self.assertIn("restore-keys: runner-health-alert-", job)
-        self.assertRegex(job, r"(?s)if: always\(\)\s*\n\s+uses: actions/cache/save@v4")
+        self.assertRegex(job, r"(?s)if: always\(\)\s*\n\s+uses: actions/cache/save@v5")
         self.assertEqual(job.count("key: runner-health-alert-${{ github.run_id }}"), 2)
 
     def test_state_adopted_only_after_successful_send(self):

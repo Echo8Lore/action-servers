@@ -85,7 +85,7 @@ jobs:
 
       # always(): out/ only ever holds the public JSON and the encrypted file (the
       # raw collector output lives in a temp dir that is deleted on exit).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: fleet-host-${{ matrix.host.id }}
@@ -101,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: fleet-host-*
           path: hosts
@@ -118,7 +118,7 @@ jobs:
           # Encrypted full reports, if any, travel with the public one.
           cp hosts/*.json.gpg report/ 2>/dev/null || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: fleet-inventory-report
           path: report/
