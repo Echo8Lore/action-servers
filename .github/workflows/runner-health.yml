@@ -213,6 +213,7 @@ jobs:
           USAGE: ${{ steps.probe.outputs.usage }}
           THRESHOLD: ${{ matrix.host.disk_threshold || 85 }}
         run: |
+          set -euo pipefail
           echo "Host disk: ${USAGE}% (threshold ${THRESHOLD}%)"
           if [ "$USAGE" -ge "$THRESHOLD" ]; then
             echo "::error::${HOST_ID}: disk ${USAGE}% is at or over the ${THRESHOLD}% threshold"; exit 1

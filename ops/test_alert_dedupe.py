@@ -260,6 +260,25 @@ class Main(unittest.TestCase):
         self.assertEqual(new, st)
 
 
+class DiskFailClosed(unittest.TestCase):
+    """The split check-disk leg must fail on any Probe status other than 'ok': an empty
+    or unexpected status reaches 'SSH reachable', and only 'ok' reaches the disk step."""
+
+    def disk_steps(self):
+        text = RUNNER_HEALTH.read_text()
+        start = text.index("      - name: SSH reachable\n")
+        end = text.index("\n  check-stale-jobs:", start)
+        return text[start:end]
+
+    def test_ssh_reachable_guard_is_not_ok(self):
+        block = self.disk_steps().split("      - name: Disk under threshold", 1)[0]
+        self.assertIn("if: steps.probe.outputs.status != 'ok'", block)
+
+    def test_disk_step_is_unconditional(self):
+        block = self.disk_steps().split("      - name: Disk under threshold", 1)[1]
+        self.assertNotIn("\n        if:", block)
+
+
 class Wiring(unittest.TestCase):
     """runner-health.yml's alert job: dedupe cache restored/saved, concurrency on the
     alert job, state adopted only after a successful send, test_alert passed through."""
