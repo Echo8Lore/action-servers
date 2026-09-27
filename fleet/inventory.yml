@@ -8,9 +8,8 @@
 # a host with no pinned key is never connected to.
 
 hosts:
-  - id: ovh-staging            # OVH "DevOps_Server_002" (vps-8832134f); also hosts
-    ssh_secret_prefix: DEVOPS  # vps-ci-runner-01 (Weapons_Lore) and wh40k-runner-01
-                               # (warhammer-40k-database); neither is tracked here.
+  - id: ovh-staging            # OVH "DevOps_Server_002" (vps-8832134f), CI box 1.
+    ssh_secret_prefix: DEVOPS
     disk_threshold: 85
 
   - id: ovh-devops-001         # OVH vps-f8fe5d07 (CI box 2). Despite its old
@@ -26,7 +25,6 @@ hosts:
 # runners[] (repo targets + every repo of an org target). Their runners are not
 # tracked here.
 watch_repos:
-  - ResearchMonkey/warhammer-40k-database
   - ResearchMonkey/Codex_of_things
 
 # Domains fleet-inventory.yml resolves and maps to the host whose IPs match.
@@ -40,6 +38,20 @@ runners:
     target: Echo8Lore
     labels: [self-hosted, Linux, X64]
     systemd_unit: actions.runner.Echo8Lore.org-runner-02.service
+
+  - name: vps-ci-runner-01     # Weapons_Lore repo runner; ci-gate.yml asks only for
+    host: ovh-staging          # `self-hosted`, so it and org-runner-02 both serve it.
+    scope: repo
+    target: Echo8Lore/Weapons_Lore
+    labels: [self-hosted, Linux, X64, vps, ci-runner, wl]
+    systemd_unit: actions.runner.Echo8Lore-Weapons_Lore.vps-ci-runner-01.service
+
+  - name: wh40k-runner-01
+    host: ovh-staging
+    scope: repo
+    target: ResearchMonkey/warhammer-40k-database
+    labels: [self-hosted, Linux, X64, vps, ci-runner, warhammer]
+    systemd_unit: actions.runner.ResearchMonkey-warhammer-40k-database.wh40k-runner-01.service
 
   - name: personal-fieldkit-01
     host: ovh-staging
