@@ -26,10 +26,12 @@ pinned_ssh_opts() {
   fi
   # GlobalKnownHostsFile=/dev/null: only the pinned file counts. UpdateHostKeys=no: the
   # server cannot add keys. CheckHostIP=no: the address is never looked up or recorded.
+  # The path is quoted inside the value: ssh splits UserKnownHostsFile on spaces (a
+  # checkout under "/home/x/My Repos/..." would otherwise name two files, neither real).
   # shellcheck disable=SC2034  # read by the sourcing script
   PINNED_SSH_OPTS=(-i "$key" -o BatchMode=yes -o ConnectTimeout=20
                    -o HostKeyAlias="$id" -o StrictHostKeyChecking=yes
-                   -o UserKnownHostsFile="$PINNED_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null
+                   -o UserKnownHostsFile="\"$PINNED_KNOWN_HOSTS\"" -o GlobalKnownHostsFile=/dev/null
                    -o UpdateHostKeys=no -o CheckHostIP=no -o LogLevel=ERROR)
 }
 

@@ -272,7 +272,8 @@ class CollectHostScript(unittest.TestCase):
         for opt in ("HostKeyAlias=h", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=/dev/null",
                     "UpdateHostKeys=no", "CheckHostIP=no"):
             self.assertIn(opt, args)
-        self.assertTrue(any(a.startswith("UserKnownHostsFile=") and a.endswith("known_hosts")
+        # The path carries its own quotes: ssh splits UserKnownHostsFile on spaces.
+        self.assertTrue(any(a.startswith('UserKnownHostsFile="') and a.endswith('known_hosts"')
                             for a in args), args)
         self.assertFalse(any("accept-new" in a for a in args))
 
