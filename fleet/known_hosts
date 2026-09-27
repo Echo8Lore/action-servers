@@ -11,8 +11,8 @@
 #
 # SHA256 fingerprints, for eyeballing against `ssh-keygen -lf` on the host:
 #   ovh-staging     SHA256:nEHWQurrW4s3cqbmkaHeoWy1Qmjgky5HTxA7jWyIYT4
-#   ovh-devops-001  SHA256:TvZ3navXHLwyRRUPdjft/4JrW0haxQIoyP69UqXbdfg
+#   ovh-devops-001  SHA256:36Awf/Kb9kHXemMTtwMOV3mBr2vHXX1AbFBiLcw8Ils
 #   hosting-vps     SHA256:xOHS/msE2NTLnTd1hMmmaJHjixMRWUPI/wbcr9WPkjw
 ovh-staging ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCudSiOiYSZ8iHzEm+r5pwFYXNktWqGFW3aXJMbn/pY
-ovh-devops-001 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBcGV2xCf9Ahatfo3XdK1v5DHs9HFDpJT/rwE1QTeONs
+ovh-devops-001 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGaIClaTD9iwA0i+doq2fwETWBN5ImA9xzr2Dh6WCLFZ
 hosting-vps ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGHYuHL8re7Zcndx1N8YJHLCFTxd5gT9V6Ype6jbN7Q4
