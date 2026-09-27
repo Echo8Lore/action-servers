@@ -16,7 +16,8 @@ GitHub repo/org secrets or a local, gitignored config file.
 
 | Path | Purpose |
 |---|---|
-| `runners/bootstrap-host.sh` | One-time per-VPS setup: Node 20, Docker, Playwright/Chromium, base tools |
+| `runners/bootstrap-host.sh` | One-time per-VPS setup: Node 20, Docker (+ Buildx, Compose), gh, Playwright/Chromium, base tools, and every `runners/packages.d/*.txt` list |
+| `runners/packages.d/<project>.txt` | A project's extra system packages (e.g. wh40k's `libzbar0t64`), applied to every CI host so they stay identical; fleet-inventory reports package parity |
 | `runners/register-runner.sh` | Register one self-hosted runner (repo- or org-scoped); supports many runners per host |
 | `fleet/inventory.example.yml` | Template for the runner inventory the monitor reads |
 | `deploy/deploy.sh` | Config-driven local/fallback deploy to a VPS |

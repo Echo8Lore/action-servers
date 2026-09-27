@@ -91,5 +91,15 @@ else
   absent "ss not installed"
 fi
 
+echo "@@@ apt_manual"
+# Package names only (no versions), for the package-parity check between CI hosts
+# (OPS-46). `apt-mark showmanual` reads the dpkg/apt state; it needs no root.
+if have apt-mark; then
+  apt-mark showmanual 2>/dev/null || absent "apt-mark showmanual failed"
+  echo "__END__"
+else
+  absent "apt-mark not installed (not a Debian/Ubuntu host?)"
+fi
+
 echo "@@@ end"
 exit 0

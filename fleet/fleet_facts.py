@@ -8,7 +8,8 @@ Subcommands (stdlib only; runs on ubuntu-latest's python3):
   public   FULL ...       -> PUBLIC json (no IPs, ports, images or server_name lists)
   missing  --id ID ...    -> PUBLIC json for a host whose secrets are not set
   failed   --id ID ...    -> PUBLIC json for a configured host that SSH could not reach
-  report   INVENTORY DIR  -> fleet-report.json + markdown summary (drift + domain map)
+  report   INVENTORY DIR  -> fleet-report.json + markdown summary (drift + domain map
+                            + package parity between hosts of the same role)
 
 FULL never leaves the job except GPG-encrypted. PUBLIC is what the artifact and the step
 summary carry, because on a public repo both are readable by any logged-in GitHub user.
@@ -19,10 +20,13 @@ import datetime as dt
 import ipaddress
 import json
 import pathlib
+import re
 import socket
 import sys
 
 ABSENT = "__ABSENT__"
+# A Debian package name, optionally with the ":arch" apt-mark adds for foreign arches.
+PKG_NAME = re.compile(r"^[a-z0-9][a-z0-9.+-]+(:[a-z0-9-]+)?$")
 
 
 # ── parse ────────────────────────────────────────────────────────────────────
@@ -175,7 +179,34 @@ def parse_raw(raw):
             except (IndexError, ValueError):
                 pass
         full["listening_tcp"] = {"state": "present", "ports": sorted(ports), "sockets": addrs}
+
+    full["apt_manual"] = parse_apt_manual(s)
     return full
+
+
+def is_ip(x):
+    try:
+        ipaddress.ip_address(x)
+        return True
+    except ValueError:
+        return False
+
+
+def package_names(lines):
+    """Only well-formed package names survive, so nothing else can reach the public
+    report through this section (an address-shaped line is dropped too)."""
+    return sorted({x.strip() for x in lines
+                   if PKG_NAME.match(x.strip()) and not is_ip(x.strip())})
+
+
+def parse_apt_manual(s):
+    if "apt_manual" not in s:   # a collector from before OPS-46
+        return {"state": "absent", "reason": "not collected"}
+    lines = s["apt_manual"]
+    r = absent_reason(lines)
+    if r:
+        return {"state": "absent", "reason": r}
+    return {"state": "present", "packages": package_names(ln for ln in lines if ln != "__END__")}
 
 
 # ── public ───────────────────────────────────────────────────────────────────
@@ -245,6 +276,8 @@ def make_public(full, host_id, target, domains, records_for=domain_records):
     units = full.get("runner_units")
     unit_files = full.get("runner_unit_files")
     containers = docker.get("containers") if isinstance(docker.get("containers"), list) else []
+    apt = as_dict(full.get("apt_manual"))
+    apt_pkgs = apt.get("packages") if isinstance(apt.get("packages"), list) else None
     port_list = ports.get("ports") if isinstance(ports.get("ports"), list) else []
     return {
         "id": host_id,
@@ -264,6 +297,11 @@ def make_public(full, host_id, target, domains, records_for=domain_records):
                           "port_count": len(port_list) if state_of(ports) == "present" else None},
         "public_ip_counts": {"ipv4": v4, "ipv6": len(public_ips) - v4},
         "domains": doms,
+        # Package names are published (they are what the parity check compares, and
+        # say nothing about where a host is); versions are not collected at all.
+        "apt_manual": ({"state": "present", "packages": package_names(p for p in apt_pkgs if isinstance(p, str))}
+                       if state_of(apt) == "present" and apt_pkgs is not None
+                       else {"state": "absent", "reason": apt.get("reason") or "not collected"}),
     }
 
 
@@ -302,6 +340,59 @@ def drift(inventory, hosts):
         for unit in sorted(found[hid]):
             if unit not in expected:
                 out["extra"].append({"unit": unit, "host": hid})
+    return out
+
+
+def host_roles(inventory):
+    """host id -> role. A host's explicit `role:` wins; otherwise a host that carries
+    runners in inventory.yml is "ci", and any other host (hosting-vps) has no role and
+    is left out of the parity check."""
+    runner_hosts = {r.get("host") for r in inventory.get("runners") or [] if isinstance(r, dict)}
+    roles = {}
+    for h in inventory.get("hosts") or []:
+        if not isinstance(h, dict) or not isinstance(h.get("id"), str):
+            continue
+        role = h.get("role") if isinstance(h.get("role"), str) and h.get("role") else (
+            "ci" if h["id"] in runner_hosts else None)
+        roles[h["id"]] = role
+    return roles
+
+
+def host_packages(h):
+    """(set of package names, None) or (None, reason it cannot be compared)."""
+    if h.get("status") != "ok":
+        return None, h.get("status") or "no status"
+    apt = as_dict(h.get("apt_manual"))
+    pkgs = apt.get("packages")
+    if apt.get("state") != "present" or not isinstance(pkgs, list):
+        return None, f"apt_manual {apt.get('reason') or 'not collected'}"
+    return {p for p in pkgs if isinstance(p, str)}, None
+
+
+def package_parity(inventory, hosts):
+    """Per role: packages installed by hand (apt-mark showmanual) on some of the role's
+    hosts but not on others. Hosts that could not be read are listed as unverified."""
+    by_id = {h.get("id"): h for h in hosts}
+    roles = host_roles(inventory)
+    out = []
+    for role in sorted({r for r in roles.values() if r}):
+        ids = [hid for hid, r in roles.items() if r == role]
+        pkgs, unverified = {}, []
+        for hid in ids:
+            got, why = host_packages(by_id.get(hid, {"status": "no_result"}))
+            if got is None:
+                unverified.append({"host": hid, "reason": why})
+            else:
+                pkgs[hid] = got
+        diffs = []
+        if len(pkgs) >= 2:
+            union, common = set().union(*pkgs.values()), set.intersection(*pkgs.values())
+            for p in sorted(union - common):
+                diffs.append({"package": p,
+                              "present_on": sorted(h for h in pkgs if p in pkgs[h]),
+                              "missing_on": sorted(h for h in pkgs if p not in pkgs[h])})
+        out.append({"role": role, "hosts": ids, "compared": sorted(pkgs),
+                    "unverified": unverified, "differences": diffs})
     return out
 
 
@@ -380,6 +471,21 @@ def markdown(report):
     for kind in ("missing", "misplaced", "extra", "unverified"):
         for e in dr[kind]:
             L.append(f"- **{kind}**: `{e['unit']}` " + ", ".join(f"{k}={v}" for k, v in e.items() if k != "unit"))
+    L += ["", "### Package parity (apt-mark showmanual, hosts of the same role)", "",
+          "Roles come from fleet/inventory.yml: hosts that carry runners are `ci`; a host with no "
+          "runners and no `role:` is not compared."]
+    for g in report.get("package_parity", []):
+        L += ["", f"**{g['role']}** ({', '.join(g['hosts'])})", ""]
+        for u in g["unverified"]:
+            L.append(f"- not compared: {u['host']} ({u['reason']})")
+        if len(g["compared"]) < 2:
+            L.append("- fewer than two hosts could be compared.")
+        elif not g["differences"]:
+            L.append(f"- No differences between {', '.join(g['compared'])}.")
+        else:
+            L += ["| Package | Present on | Missing on |", "|---|---|---|"]
+            for d in g["differences"]:
+                L.append(f"| {d['package']} | {', '.join(d['present_on'])} | **{', '.join(d['missing_on'])}** |")
     return "\n".join(L) + "\n"
 
 
@@ -400,6 +506,18 @@ def warnings(report):
     for kind in ("missing", "misplaced", "extra"):
         for e in report["drift"][kind]:
             w.append(f"runner drift ({kind}): {e['unit']}")
+    for g in report.get("package_parity", []):
+        lacking = {}
+        for d in g["differences"]:
+            for hid in d["missing_on"]:
+                lacking.setdefault(hid, []).append(d["package"])
+        for hid in sorted(lacking):
+            w.append(f"package parity ({g['role']}): {hid} lacks {', '.join(lacking[hid])} "
+                     f"(installed on other {g['role']} hosts)")
+        for u in g["unverified"]:
+            if not u["reason"].startswith("apt_manual"):
+                continue   # an unreachable/unconfigured host is already warned about above
+            w.append(f"package parity ({g['role']}): {u['host']} not compared ({u['reason']})")
     return w
 
 
@@ -423,7 +541,7 @@ def build_report(inv, hostdir, records_for=domain_records):
     hosts = [found.get(h["id"], {"id": h["id"], "status": "no_result"}) for h in inv.get("hosts", [])]
     report = {"generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "hosts": hosts, "domains": domain_map(inv.get("domains") or [], hosts, records_for),
-              "drift": drift(inv, hosts)}
+              "drift": drift(inv, hosts), "package_parity": package_parity(inv, hosts)}
     report["warnings"] = warnings(report)
     return report
 

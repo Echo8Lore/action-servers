@@ -2,8 +2,8 @@ name: Fleet Inventory
 
 # Polls every host in fleet/inventory.yml over SSH (READ-ONLY; fleet/collect-facts.sh)
 # and reports what is actually there: hostname, OS, uptime, disk /, memory, runner
-# systemd units, nginx / docker / listening-port presence, and which host each
-# configured domain's DNS records point at. Host facts are polled, not remembered.
+# systemd units, nginx / docker / listening-port presence, which host each
+# configured domain's DNS records point at, and package parity between CI hosts. Host facts are polled, not remembered.
 #
 # WHAT IS PUBLISHED, AND WHY. This repo is public: job logs, the step summary and
 # artifacts are all readable by any logged-in GitHub user. Host addresses are kept in
@@ -12,7 +12,9 @@ name: Fleet Inventory
 #   - Every discovered IP is ::add-mask::ed before anything is printed, and the raw
 #     collector output is never printed.
 #   - The public report (artifact + summary) carries host-id <-> domain matches,
-#     counts, runner units and drift. It does NOT carry IP addresses, listening ports,
+#     counts, runner units and drift, and each host's manually installed package
+#     names (apt-mark showmanual, no versions) for the package-parity check between
+#     hosts of the same role (OPS-46). It does NOT carry IP addresses, listening ports,
 #     container names/images or nginx server_name lists: together those are a recon map
 #     of the fleet, and none of them are needed for the drift / domain questions.
 #   - The FULL facts (including those fields) are kept only GPG-encrypted, and only if
