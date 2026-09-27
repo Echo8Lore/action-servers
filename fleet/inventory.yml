@@ -59,3 +59,17 @@ runners:
     target: ResearchMonkey/FieldKit
     labels: [self-hosted, Linux, X64, fieldkit]
     systemd_unit: actions.runner.ResearchMonkey-FieldKit.personal-fieldkit-01.service
+
+  - name: personal-fieldkit-02
+    host: ovh-devops-001
+    scope: repo
+    target: ResearchMonkey/FieldKit
+    labels: [self-hosted, Linux, X64, fieldkit]
+    systemd_unit: actions.runner.ResearchMonkey-FieldKit.personal-fieldkit-02.service
+
+  - name: wh40k-runner-02
+    host: ovh-devops-001
+    scope: repo
+    target: ResearchMonkey/warhammer-40k-database
+    labels: [self-hosted, Linux, X64, vps, ci-runner, warhammer]
+    systemd_unit: actions.runner.ResearchMonkey-warhammer-40k-database.wh40k-runner-02.service
