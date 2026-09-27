@@ -8,7 +8,8 @@ name: Restart Self-Hosted Runner
 #   - <PREFIX>_VPS_HOST, <PREFIX>_VPS_USERNAME, <PREFIX>_VPS_SSH_KEY
 #   - RUNNER_HEALTH_PAT (admin scope on the org + personal repos, for the verify step)
 #   - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (optional; outcome notification via
-#     ops/notify-telegram.sh, fetched from Echo8Lore/action-servers at job.workflow_sha)
+#     ops/notify-telegram.sh, fetched from Echo8Lore/action-servers at job.workflow_sha).
+#     Called from runner-health (quiet_unless_online), only "verified online" notifies.
 #
 # Multi-host: the host is chosen by ssh_secret_prefix (the host's value in
 # fleet/inventory.yml), resolved via secrets[format(...)].
@@ -58,6 +59,13 @@ on:
         required: false
         default: ''
         type: string
+      # runner-health.yml sets this: its own (deduplicated) CRITICAL already covers a
+      # runner that stays offline, so the restart only notifies a verified recovery.
+      # Manual dispatches don't have the input and keep the "NOT confirmed" notice.
+      quiet_unless_online:
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -190,7 +198,12 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_RUNNER: ${{ inputs.runner_name }}
           ONLINE: ${{ steps.verify.outputs.online }}
+          QUIET: ${{ inputs.quiet_unless_online }}
         run: |
+          if [ "$ONLINE" != "true" ] && [ "$QUIET" = "true" ]; then
+            echo "Not confirmed online; no notice (runner-health's alert covers it)."
+            exit 0
+          fi
           if [ "$ONLINE" = "true" ]; then
             MSG="Self-hosted runner ${TARGET_RUNNER} restarted and verified online."
           else

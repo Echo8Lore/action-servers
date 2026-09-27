@@ -29,7 +29,8 @@
 #   - the Authorization header goes to curl on stdin (-K -), not in argv (argv is
 #     world-readable in /proc and ps), and the variable is unset from the environment
 #     curl inherits;
-#   - curl runs with -q, so no ~/.curlrc can add or redirect anything;
+#   - curl runs with -q, so no ~/.curlrc can add or redirect anything, and with
+#     --proto =https, so the token can only ever go out over TLS;
 #   - curl's stderr and the response body go to temp files; only the HTTP status, the
 #     curl exit code and GitHub's short error "message" field are logged;
 #   - no `set -x`.
@@ -84,7 +85,7 @@ while :; do
   attempt=$((attempt + 1))
   rc=0
   HTTP=$(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" \
-    | curl -q -sS -K - -X POST \
+    | curl -q -sS -K - -X POST --proto =https \
         --connect-timeout 10 --max-time 30 \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \

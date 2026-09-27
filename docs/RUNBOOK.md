@@ -12,6 +12,14 @@ on the two CI boxes (**Fleet dispatch timers** below):
 | `runner-health.yml` (liveness, disk, stale jobs, auto-restart) | every 30 min | hourly | ~every 4-5 h |
 | `queue-watchdog.yml` (jobs stuck in the queue) | every 10 min | every 20 min | ~every 4-5 h |
 
+Because runner-health can run every 30 min, its Telegram alert is deduplicated
+(`ops/alert_dedupe.py`): an incident pages when it starts, when its set of conditions
+changes (another runner goes offline, a new stale run, a scheduler finding), every 6 h
+while unchanged ("REPEAT"), and once more as "RESOLVED - fleet healthy" when everything
+clears. Auto-restart only notifies a restart that brought the runner back online; a
+runner that stays offline is the monitor's CRITICAL. A **Run workflow** with
+`test_alert` always sends.
+
 ## Quick reference
 
 | Symptom | Action |
@@ -166,6 +174,15 @@ enables the timers and lists them. Starting a timer dispatches nothing; the firs
 dispatch is the box's next slot. The installer is idempotent: re-running it re-installs
 the files and keeps the existing token.
 
+Installer exit codes: 0 ok; 2 refused (bad arguments, not root, no `wl_admin`, or
+`wl_admin`'s home is not `/home/wl_admin`) and nothing changed; 3 token empty or
+malformed, and nothing written; **4 `systemd-analyze verify` failed**. After exit 4
+the script, units and `.env` **are installed but the timers are NOT enabled** (a
+re-install over a working box may leave the old timers running on the new files).
+Read the verify error, then either fix the cause (usually a stale checkout: `git
+pull --ff-only`) and re-run the installer, or run `--uninstall` to go back to nothing.
+`systemctl list-timers --all 'fleet-dispatch@*'` shows which state you're in.
+
 Non-interactive (EDI/Hermes, when the PAT is in its Bitwarden Secrets Manager project
 and so in its environment): pipe it on stdin, never in argv:
 
@@ -186,10 +203,13 @@ gh variable set FLEET_DISPATCH_ENABLED -R Echo8Lore/action-servers --body true
 
 ```bash
 systemctl list-timers --all 'fleet-dispatch@*'           # NEXT/LAST per timer
-journalctl -u 'fleet-dispatch@*' --since -2h --no-pager   # one line per dispatch
-systemctl status 'fleet-dispatch@*.service' --no-pager    # last result + exit code
+systemctl list-units --all 'fleet-dispatch@*'             # timers active; a service shows 'failed' if its last run failed
+journalctl -u 'fleet-dispatch@*' --since -2h --no-pager   # one line per dispatch, with the exit status
 sudo systemctl start fleet-dispatch@runner-health.service # dispatch once now (optional)
 ```
+
+Use the journal, not `systemctl status <service>`, for past runs: a oneshot that
+succeeded is unloaded between runs, so `status` often shows nothing useful.
 
 A good journal line: `fleet-dispatch: dispatched runner-health.yml on main (HTTP 204,
 attempt 1)`. On GitHub, the runs show as **workflow_dispatch** events:
@@ -229,6 +249,15 @@ counts, for runner-health and queue-watchdog, the `workflow_dispatch` runs of th
 4 min off), and calls a slot **silent** when fewer than half of its expected dispatches
 arrived. Manual dispatches away from the slot times are ignored. A GitHub API error
 only warns in the log and never alerts.
+
+One blind spot: a manual `gh workflow run` (or **Run workflow**) within 4 min of a
+slot time counts for that slot, since timer and manual runs come from the same token
+owner and can't be told apart. That can only hide a missing dispatch (a false
+negative), never raise a false alarm, and only for the one slot time it lands on.
+
+These findings go through runner-health's alert dedupe like every other condition: a
+finding pages when it appears, when the set of silent slots changes, and every 6 h
+while it lasts, not every run. The dispatch counts are not part of the fingerprint.
 
 - **WARNING - scheduler degraded: dispatch timers not firing for <workflow>**: every
   slot is silent. That monitor is back on the throttled cron (~6/day). Because both

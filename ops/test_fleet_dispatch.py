@@ -106,6 +106,7 @@ class Dispatch(unittest.TestCase):
         self.assertIn("https://api.github.com/repos/Echo8Lore/action-servers/actions/"
                       "workflows/runner-health.yml/dispatches", argv)
         self.assertEqual(argv[argv.index("--data") + 1], '{"ref":"main"}')
+        self.assertEqual(argv[argv.index("--proto") + 1], "=https")  # TLS only
         self.assertIn("--max-time", argv)
         self.assertIn("--connect-timeout", argv)
 
@@ -209,6 +210,7 @@ class Units(unittest.TestCase):
                      ("PrivateDevices", "yes"), ("CapabilityBoundingSet", "")):
             self.assertEqual(d.get(k), [v], k)
         self.assertNotIn("DynamicUser", d)   # no new users (SECURITY_POLICY rule 6)
+        self.assertNotIn("RemoveIPC", d)
 
     def test_timer(self):
         d = self.directives(TIMER)
@@ -254,13 +256,25 @@ class Installer(unittest.TestCase):
         body = [(i, ln) for i, ln in enumerate(lines) if not ln.lstrip().startswith("#")]
         guard_user = next(i for i, ln in body if 'id -u "$RUN_USER"' in ln and "if !" in ln)
         guard_root = next(i for i, ln in body if '"$(id -u)" -ne 0' in ln)
+        guard_home = next(i for i, ln in body if '"$RUN_HOME" != "/home/${RUN_USER}"' in ln)
         mutating = re.compile(r"\b(systemctl|install -[dm]|chown|mv -f|rm -[rf]+|rmdir)\b")
         check_end = next(i for i, ln in body if ln.strip() == "exit 0")  # end of --check
         first_change = next(i for i, ln in body if i > check_end and mutating.search(ln)
                             and "list-timers" not in ln and "()" not in ln)
         self.assertLess(guard_user, first_change)
         self.assertLess(guard_root, first_change)
+        self.assertLess(guard_home, first_change)
         self.assertIn("REFUSED: no ${RUN_USER} user on this box", lines[guard_user + 1])
+
+    def test_env_path_matches_the_unit(self):
+        # The home guard pins RUN_HOME to /home/wl_admin; the .env then lands where the
+        # unit's EnvironmentFile looks.
+        src = INSTALLER.read_text()
+        self.assertIn('ENV_DIR="$RUN_HOME/.config/fleet-dispatch"', src)
+        self.assertIn('ENV_FILE="$ENV_DIR/.env"', src)
+        self.assertIn("RUN_USER=wl_admin", src)
+        self.assertIn("EnvironmentFile=/home/wl_admin/.config/fleet-dispatch/.env",
+                      SERVICE.read_text())
 
     def test_token_never_echoed(self):
         src = INSTALLER.read_text()

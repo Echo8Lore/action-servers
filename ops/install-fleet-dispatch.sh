@@ -150,6 +150,12 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
+# fleet-dispatch@.service hardcodes EnvironmentFile=/home/wl_admin/...; the installer
+# must write the .env exactly there, or the unit and the installer disagree.
+if [ "$RUN_HOME" != "/home/${RUN_USER}" ]; then
+  echo "REFUSED: ${RUN_USER}'s home is '${RUN_HOME}', not /home/${RUN_USER}; the unit's EnvironmentFile would not match." >&2
+  exit 2
+fi
 ENV_DIR="$RUN_HOME/.config/fleet-dispatch"
 ENV_FILE="$ENV_DIR/.env"
 

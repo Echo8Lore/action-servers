@@ -35,9 +35,9 @@ name: Runner Health Monitor
 # check-scheduler watches the timers: it counts this workflow's and queue-watchdog's
 # recent workflow_dispatch runs per slot (ops/dispatch_liveness.py) and adds "scheduler
 # degraded: dispatch timers not firing" (both slots silent) or a half-rate NOTICE (one
-# slot silent) to the alert. It runs only when the repo variable FLEET_DISPATCH_ENABLED
-# is 'true', set after the timers are installed (docs/RUNBOOK.md), so it cannot
-# false-alarm before then.
+# slot silent) to the alert, deduplicated like every alert (see the alert job). It
+# runs only when the repo variable FLEET_DISPATCH_ENABLED is 'true', set after the
+# timers are installed (docs/RUNBOOK.md), so it cannot false-alarm before then.
 
 on:
   schedule:
@@ -256,6 +256,7 @@ jobs:
     timeout-minutes: 3
     outputs:
       message: ${{ steps.check.outputs.message }}
+      keys: ${{ steps.check.outputs.keys }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -268,25 +269,50 @@ jobs:
           set -euo pipefail
           python3 ops/dispatch_liveness.py check \
             --schedule ops/systemd/fleet-dispatch.schedule \
-            --repo "$GITHUB_REPOSITORY" --message "$RUNNER_TEMP/scheduler.txt"
+            --repo "$GITHUB_REPOSITORY" --message "$RUNNER_TEMP/scheduler.txt" \
+            --keys "$RUNNER_TEMP/scheduler-keys.txt"
           {
             echo 'message<<SCHEDULER_EOF'
             cat "$RUNNER_TEMP/scheduler.txt"
             echo 'SCHEDULER_EOF'
+            echo 'keys<<SCHEDULER_EOF'
+            cat "$RUNNER_TEMP/scheduler-keys.txt"
+            echo 'SCHEDULER_EOF'
           } >> "$GITHUB_OUTPUT"
 
-  # ── Tiered Telegram alert ────────────────────────────────────────────────
+  # ── Tiered Telegram alert, deduplicated ─────────────────────────────────
   # A real alert that cannot be delivered (secrets missing, or Telegram refuses it)
   # WARNS and exits 0: the checks above already ran and their results are in this run,
   # and a red alert job would not reach anyone either. The test_alert path is the
   # opposite: its whole purpose is to prove delivery, so it fails when delivery fails.
+  #
+  # Dedupe (ops/alert_dedupe.py): at the dispatch cadence (every 30 min) an ongoing
+  # incident would otherwise page ~48x a day. The page is fingerprinted by its condition
+  # KEYS (offline runner names, disk, stale runs, scheduler findings), not its prose.
+  # It is sent when the fingerprint changes or is 6 h old, plus one "RESOLVED" when
+  # everything clears; test_alert bypasses it. State ({fingerprint, paged_at}) lives in
+  # the Actions cache like queue-watchdog's: saved under a new key each run, restored by
+  # prefix, and the new state adopted only after Telegram accepted the message, so a
+  # failed send pages again next run. If the cache is evicted, an ongoing incident pages
+  # once more: that errs toward paging. If the helper itself fails, the message is sent
+  # undeduplicated.
   alert:
     needs: [check-runners, check-disk, check-stale-jobs, check-scheduler]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    concurrency:
+      group: runner-health-alert
+      cancel-in-progress: false   # two alert jobs racing would fork the dedupe state
     steps:
       - uses: actions/checkout@v5
+
+      - name: Restore dedupe state
+        uses: actions/cache/restore@v4
+        with:
+          path: .runner-health
+          key: runner-health-alert-${{ github.run_id }}
+          restore-keys: runner-health-alert-
 
       - name: Build and send alert
         env:
@@ -300,6 +326,10 @@ jobs:
           STALE_COUNT: ${{ needs.check-stale-jobs.outputs.stale_count }}
           STALE_SUMMARY: ${{ needs.check-stale-jobs.outputs.stale_summary }}
           SCHEDULER_MESSAGE: ${{ needs.check-scheduler.outputs.message }}
+          SCHEDULER_KEYS: ${{ needs.check-scheduler.outputs.keys }}
+          # "No condition" only means "healthy" when the checks really ran: a failed
+          # check job must not produce a RESOLVED.
+          INCOMPLETE: ${{ needs.check-runners.result != 'success' || needs.check-stale-jobs.result != 'success' || needs.check-scheduler.result == 'failure' || needs.check-scheduler.result == 'cancelled' }}
         run: |
           # Plain text. The facts are runner names, counts and workflow run names --
           # no host addresses -- so the text is safe to echo into this public log.
@@ -330,12 +360,49 @@ jobs:
 
           if [ -z "$MESSAGE" ]; then
             echo "All checks passed - fleet healthy."
+            : > "$RUNNER_TEMP/alert.txt"
           else
-            FULL="Runner Health Monitor\n\n${MESSAGE}${RUN_URL}"
-            printf '%b\n' "$FULL"
-            printf '%b\n' "$FULL" | bash ops/notify-telegram.sh || true   # warns on its own
+            printf '%b\n' "Runner Health Monitor\n\n${MESSAGE}${RUN_URL}" > "$RUNNER_TEMP/alert.txt"
+            cat "$RUNNER_TEMP/alert.txt"
+          fi
+
+          mkdir -p .runner-health
+          [ -f .runner-health/state.json ] || echo '{}' > .runner-health/state.json
+          drc=0
+          python3 ops/alert_dedupe.py decide \
+            --state .runner-health/state.json --new-state "$RUNNER_TEMP/new-state.json" \
+            --message "$RUNNER_TEMP/alert.txt" --out "$RUNNER_TEMP/send.txt" \
+            --run-url "$RUN_URL" \
+            --any-offline "$ANY_OFFLINE" --offline-runners "$OFFLINE_RUNNERS" \
+            --disk "$DISK_WARNING" \
+            --stale-count "$STALE_COUNT" --stale-summary "$STALE_SUMMARY" \
+            --scheduler-keys "$SCHEDULER_KEYS" \
+            --incomplete "$INCOMPLETE" --test-alert "$TEST_ALERT" || drc=$?
+          if [ "$drc" -ne 0 ]; then
+            echo "::warning::alert dedupe failed (exit ${drc}); sending undeduplicated, state unchanged."
+            cp "$RUNNER_TEMP/alert.txt" "$RUNNER_TEMP/send.txt"
+            cp .runner-health/state.json "$RUNNER_TEMP/new-state.json"
+          fi
+
+          if [ -s "$RUNNER_TEMP/send.txt" ]; then
+            rc=0
+            bash ops/notify-telegram.sh < "$RUNNER_TEMP/send.txt" || rc=$?   # warns on its own
+            if [ "$rc" -eq 0 ]; then
+              cp "$RUNNER_TEMP/new-state.json" .runner-health/state.json
+            else
+              echo "::warning::Alert not delivered (exit ${rc}); keeping the old dedupe state so it pages again next run."
+            fi
+          else
+            cp "$RUNNER_TEMP/new-state.json" .runner-health/state.json
           fi
           exit "${TEST_FAILED:-0}"
+
+      - name: Save dedupe state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .runner-health
+          key: runner-health-alert-${{ github.run_id }}
 
   # ── Auto-restart each offline runner by its systemd unit ─────────────────
   auto-restart:
@@ -351,4 +418,7 @@ jobs:
       systemd_unit: ${{ matrix.runner.unit }}
       ssh_secret_prefix: ${{ matrix.runner.prefix }}
       runners_api: ${{ matrix.runner.api }}
+      # A failed restart is already this run's CRITICAL (deduplicated above); only the
+      # state change "restarted and verified online" pages from the restart itself.
+      quiet_unless_online: true
     secrets: inherit

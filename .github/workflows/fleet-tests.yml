@@ -6,7 +6,7 @@ name: Fleet Tests
 # inventory host, keyed by id, no addresses). ops/: the queue watchdog's classification,
 # dedupe and public-log hygiene; fleet-dispatch.sh (token off argv, allowlist, retry
 # policy, exit codes; curl stubbed), its systemd units and installer --check, and the
-# dispatch-timer liveness check. deploy/: host-key pinning for the deploy path (pin
+# dispatch-timer liveness check; runner-health's alert dedupe and its wiring. deploy/: host-key pinning for the deploy path (pin
 # parsing, ssh options, the preflight, every deploy ssh/rsync using them), deploy.yml's
 # rsync excludes, and no public IP address in any tracked file.
 # Stdlib only; no secrets, no network.

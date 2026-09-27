@@ -211,7 +211,18 @@ class Check(unittest.TestCase):
     def test_nothing_dispatched_is_degraded_for_both(self):
         out, warns, _, _ = self.run_check({"runner-health.yml": runs_json([]),
                                            "queue-watchdog.yml": runs_json([])})
-        self.assertEqual([lvl for lvl, _ in out], ["WARNING", "WARNING"])
+        self.assertEqual([lvl for lvl, _, _ in out], ["WARNING", "WARNING"])
+        self.assertEqual([k for _, _, k in out],
+                         ["scheduler:WARNING:queue-watchdog.yml:a,b",
+                          "scheduler:WARNING:runner-health.yml:a,b"])
+
+    def test_key_names_the_quiet_slot_without_counts(self):
+        WF_MINUTES.clear()
+        WF_MINUTES.update(TIMERS["runner-health.yml"])
+        out, _, _, _ = self.run_check({
+            "runner-health.yml": runs_json(fired("a")),
+            "queue-watchdog.yml": runs_json(self.all_fired("queue-watchdog.yml"))})
+        self.assertEqual([k for _, _, k in out], ["scheduler:NOTICE:runner-health.yml:b"])
 
     def test_schedule_runs_are_not_dispatches(self):
         rh = self.all_fired("runner-health.yml")
@@ -246,6 +257,7 @@ class Check(unittest.TestCase):
     def test_main_writes_the_message(self):
         with tempfile.TemporaryDirectory() as d:
             msg = pathlib.Path(d) / "m"
+            keys = pathlib.Path(d) / "k"
             sched = pathlib.Path(d) / "s"
             sched.write_text(SCHEDULE)
             api = FakeApi({"runner-health.yml": runs_json([]),
@@ -255,8 +267,9 @@ class Check(unittest.TestCase):
                     mock.patch.object(dl, "now_utc", return_value=NOW), \
                     contextlib.redirect_stdout(io.StringIO()):
                 rc = dl.main(["check", "--schedule", str(sched), "--repo", "o/r",
-                              "--message", str(msg)])
+                              "--message", str(msg), "--keys", str(keys)])
             self.assertEqual(rc, 0)
+            self.assertEqual(len(keys.read_text().splitlines()), 2)
             text = msg.read_text()
             self.assertEqual(text.count("scheduler degraded"), 2)
             self.assertNotIn("\\", text)   # the alert job prints it with printf %b

@@ -8,7 +8,7 @@ notices. This counts each workflow's recent workflow_dispatch runs and says when
 slot has gone quiet.
 
   dispatch_liveness.py check --schedule ops/systemd/fleet-dispatch.schedule \
-      --repo OWNER/REPO --message MSG.txt [--window-min 150]
+      --repo OWNER/REPO --message MSG.txt [--keys KEYS.txt] [--window-min 150]
 
 Env: GH_TOKEN (the job's GITHUB_TOKEN; actions: read). Missing -> warning, exit 0.
 
@@ -31,6 +31,10 @@ expected dispatches per slot, so one miss is never a silent slot.
 A slot's times are computed only up to GRACE_MIN before now, so a dispatch that is due
 this very minute but not created yet is not expected. Failures to read the API warn and
 alert nothing: this check must never be the thing that pages falsely.
+
+KEYS.txt gets one line per finding, `scheduler:<level>:<workflow>:<quiet slots>` (no
+counts), for runner-health's alert dedupe (ops/alert_dedupe.py): a finding pages once,
+not again every run just because a count moved.
 
 Public repo, public log: the log carries workflow names, slot letters, inventory host
 ids and counts only.
@@ -184,7 +188,7 @@ def dispatch_runs(api, repo, workflow, since):
 
 
 def check(schedule_text, api, repo, now, window_min, warn, log):
-    """-> list of (level, text) findings."""
+    """-> list of (level, text, dedupe key) findings."""
     hosts, timers = parse_schedule(schedule_text)
     since = now - dt.timedelta(minutes=window_min + TOLERANCE_MIN + 1)
     findings = []
@@ -199,7 +203,8 @@ def check(schedule_text, api, repo, now, window_min, warn, log):
                                         for s, (h, e) in sorted(counts.items())))
         v = verdict(workflow, counts, hosts, window_min)
         if v:
-            findings.append(v)
+            quiet = ",".join(sorted(s for s, (h, e) in counts.items() if silent(h, e)))
+            findings.append((v[0], v[1], f"scheduler:{v[0]}:{workflow}:{quiet}"))
             warn(v[1])
     return findings
 
@@ -211,12 +216,15 @@ def main(argv=None):
     p.add_argument("--schedule", required=True)
     p.add_argument("--repo", required=True)
     p.add_argument("--message", required=True)
+    p.add_argument("--keys")
     p.add_argument("--window-min", type=int, default=DEFAULT_WINDOW_MIN)
     a = ap.parse_args(argv)
 
     warn = lambda m: print(f"::warning::{m}")
     log = print
     pathlib.Path(a.message).write_text("")
+    if a.keys:
+        pathlib.Path(a.keys).write_text("")
     token = os.environ.get("GH_TOKEN", "")
     if not token:
         warn("dispatch liveness: no GH_TOKEN - not checked.")
@@ -224,7 +232,9 @@ def main(argv=None):
     findings = check(pathlib.Path(a.schedule).read_text(), github_api(token), a.repo,
                      now_utc(), a.window_min, warn, log)
     if findings:
-        pathlib.Path(a.message).write_text("\n\n".join(t for _, t in findings) + "\n")
+        pathlib.Path(a.message).write_text("\n\n".join(t for _, t, _ in findings) + "\n")
+        if a.keys:
+            pathlib.Path(a.keys).write_text("".join(f"{k}\n" for _, _, k in findings))
     else:
         log("dispatch timers firing on every slot.")
     return 0
