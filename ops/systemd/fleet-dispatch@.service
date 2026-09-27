@@ -1,0 +1,56 @@
+# fleet-dispatch@.service -- dispatch one action-servers workflow (OPS-23).
+#
+# Instance = workflow name without .yml:  fleet-dispatch@runner-health.service
+# Started by fleet-dispatch@<name>.timer; installed by ops/install-fleet-dispatch.sh.
+# Runs ops/fleet-dispatch.sh (installed as /usr/local/bin/fleet-dispatch), which
+# refuses any workflow not on its allowlist.
+#
+# Runs as the box's existing admin user (no dedicated runtime user: SECURITY_POLICY
+# rule 6). The PAT is in the 0600 wl_admin .env (rule 1). systemd reads the
+# EnvironmentFile before the sandbox below applies, so ProtectHome=yes does not hide it.
+#
+# Hardening, checked against what the script needs: bash + coreutils + grep/sed, curl
+# over IPv4/IPv6 TCP to api.github.com, DNS through systemd-resolved (AF_UNIX for NSS,
+# UDP/TCP to 127.0.0.53), /etc/ssl for CA certificates, a writable /tmp for mktemp.
+
+[Unit]
+Description=Dispatch action-servers workflow %i.yml (OPS-23)
+Documentation=https://github.com/Echo8Lore/action-servers/blob/main/docs/RUNBOOK.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=wl_admin
+EnvironmentFile=/home/wl_admin/.config/fleet-dispatch/.env
+ExecStart=/usr/local/bin/fleet-dispatch %i.yml
+SyslogIdentifier=fleet-dispatch
+# Worst case: 3 attempts x 30 s max-time + 10 s + 20 s backoff.
+TimeoutStartSec=180
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources

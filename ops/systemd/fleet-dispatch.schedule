@@ -1,0 +1,27 @@
+# fleet-dispatch.schedule -- WHEN each CI box dispatches which workflow (OPS-23).
+#
+# The single source of truth for the dispatch timers. Two readers:
+#   - ops/install-fleet-dispatch.sh renders each `timer` line of the box's slot into
+#     /etc/systemd/system/fleet-dispatch@<name>.timer.d/10-slot.conf as
+#     OnCalendar=*-*-* *:<minutes>:00
+#   - ops/dispatch_liveness.py (runner-health.yml, check-scheduler job) computes from
+#     the same lines when each slot SHOULD have dispatched, and warns when it didn't.
+#
+# The two slots interleave, so both boxes together give the target cadence and either
+# box alone still gives half of it:
+#   runner-health.yml   every 30 min combined (a :00, b :30)          -> 60 min alone
+#   queue-watchdog.yml  every 10 min combined (a :00/20/40, b :10/30/50) -> 20 min alone
+#
+# Format:
+#   slot  <a|b>  <inventory host id>           which box carries that slot
+#   timer <workflow file> <slot> <minutes>     minutes = MM or MM/step (systemd minute
+#                                              field; times are UTC on the boxes)
+# The workflow file is also the allowlist in ops/fleet-dispatch.sh; keep them in step.
+
+slot  a  ovh-staging
+slot  b  ovh-devops-001
+
+timer  runner-health.yml   a  00
+timer  runner-health.yml   b  30
+timer  queue-watchdog.yml  a  00/20
+timer  queue-watchdog.yml  b  10/20

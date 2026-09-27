@@ -1,0 +1,25 @@
+# fleet-dispatch@.timer -- when a CI box dispatches workflow %i.yml (OPS-23).
+#
+# Instance = workflow name without .yml:  fleet-dispatch@runner-health.timer
+# It starts fleet-dispatch@<same instance>.service.
+#
+# No OnCalendar here: the box's slot (a|b) decides it. ops/install-fleet-dispatch.sh
+# writes it from ops/systemd/fleet-dispatch.schedule into the drop-in
+#   /etc/systemd/system/fleet-dispatch@<name>.timer.d/10-slot.conf
+# so the two CI boxes interleave (see that file for the cadence).
+
+[Unit]
+Description=Dispatch action-servers workflow %i.yml on this box's slot (OPS-23)
+Documentation=https://github.com/Echo8Lore/action-servers/blob/main/docs/RUNBOOK.md
+
+[Timer]
+# After downtime, do not burst the missed dispatches: the next slot is soon enough, and
+# the liveness check counts dispatches that really happened.
+Persistent=false
+# Fire on the slot's second: the liveness check attributes runs to a slot by their
+# timing, and the two slots are only 10 min apart for queue-watchdog.
+AccuracySec=1s
+RandomizedDelaySec=0
+
+[Install]
+WantedBy=timers.target

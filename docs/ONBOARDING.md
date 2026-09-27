@@ -17,6 +17,12 @@ both **org** repos (`Echo8Lore/*`) and **personal** repos.
   `<host-id> ssh-ed25519 AAAA...` (keyed by id, never by address; fingerprint checked
   on the host first; see RUNBOOK "Host key changed"). A host without a pinned key is
   never connected to: its inventory, disk check and restart legs fail.
+- The fleet-dispatch timers on both CI boxes (RUNBOOK **Fleet dispatch timers**), then
+  the repo variable `FLEET_DISPATCH_ENABLED=true` on this repo. GitHub throttles cron to
+  ~6 runs/day, so without the timers the health monitor (declared hourly) and the queue
+  watchdog (declared every 30 min) each run only about every 4-5 h. With them:
+  runner-health every 30 min, queue-watchdog every 10 min. A new project needs nothing
+  extra: both monitors already cover every repo the inventory implies.
 
 ## 1. Give the project a runner
 

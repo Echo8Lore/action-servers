@@ -23,9 +23,10 @@ GitHub repo/org secrets or a local, gitignored config file.
 | `deploy/config.example.json` | Per-project deploy config schema |
 | `.github/workflows/deploy.yml` | **Reusable** deploy workflow — projects `uses:` this |
 | `deploy/host-key.sh` | Host-key pinning for both deploy paths: the caller's `VPS_HOST_KEY`, verified with `StrictHostKeyChecking=yes` (warns when unset) |
-| `.github/workflows/runner-health.yml` | Fleet health monitor (cron) — liveness, disk, stale jobs, auto-restart |
+| `.github/workflows/runner-health.yml` | Fleet health monitor — liveness, disk, stale jobs, auto-restart, and a check that the dispatch timers are firing. Every 30 min once the CI boxes' dispatch timers are installed; its cron is only a ~6/day backstop (GitHub throttles it) |
 | `.github/workflows/runner-restart.yml` | Parameterized runner restart (dispatch + `workflow_call`) |
-| `.github/workflows/queue-watchdog.yml`, `ops/queue_watchdog.py` | Alerts on jobs stuck in the queue across the fleet's repos (30 min if no runner can take the job, 2 h if runners are just busy; again at 6 h) and says which |
+| `.github/workflows/queue-watchdog.yml`, `ops/queue_watchdog.py` | Alerts on jobs stuck in the queue across the fleet's repos (30 min if no runner can take the job, 2 h if runners are just busy; again at 6 h) and says which. Scans every 10 min once the dispatch timers are installed (~every 4-5 h on its throttled cron alone) |
+| `ops/fleet-dispatch.sh`, `ops/systemd/`, `ops/install-fleet-dispatch.sh` | The dispatch timers (OPS-23): a systemd timer on each CI box dispatches runner-health and queue-watchdog through the REST API, staggered so both boxes together give every 30 / 10 min and one alone half that. `ops/dispatch_liveness.py` alerts when they stop |
 | `ops/notify-telegram.sh` | Sends one plain-text alert via the Telegram Bot API (`sendMessage` only; token never logged). Used by the health monitor, restart and queue-watchdog workflows, and by the reusable deploy workflow for deploy notifications |
 | `.github/workflows/fleet-inventory.yml` | Daily read-only poll of every inventory host (OS, uptime, disk, memory, runner units, nginx/docker presence); maps `domains[]` to hosts by DNS and reports runner drift vs the inventory. No IPs in the public report |
 | `fleet/collect-facts.sh`, `fleet/collect-host.sh`, `fleet/fleet_facts.py` | The collector it runs over SSH, the per-host driver, and the parser/report builder |
