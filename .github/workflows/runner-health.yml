@@ -329,7 +329,7 @@ jobs:
           SCHEDULER_KEYS: ${{ needs.check-scheduler.outputs.keys }}
           # "No condition" only means "healthy" when the checks really ran: a failed
           # check job must not produce a RESOLVED.
-          INCOMPLETE: ${{ needs.check-runners.result != 'success' || needs.check-stale-jobs.result != 'success' || needs.check-scheduler.result == 'failure' || needs.check-scheduler.result == 'cancelled' }}
+          INCOMPLETE: ${{ needs.check-runners.result != 'success' || needs.check-stale-jobs.result != 'success' || needs.check-scheduler.result == 'failure' || needs.check-scheduler.result == 'cancelled' || (needs.check-disk.result != 'success' && needs.check-disk.result != 'failure') }}
         run: |
           # Plain text. The facts are runner names, counts and workflow run names --
           # no host addresses -- so the text is safe to echo into this public log.
@@ -373,10 +373,10 @@ jobs:
             --state .runner-health/state.json --new-state "$RUNNER_TEMP/new-state.json" \
             --message "$RUNNER_TEMP/alert.txt" --out "$RUNNER_TEMP/send.txt" \
             --run-url "$RUN_URL" \
-            --any-offline "$ANY_OFFLINE" --offline-runners "$OFFLINE_RUNNERS" \
+            --any-offline "$ANY_OFFLINE" --offline-runners="$OFFLINE_RUNNERS" \
             --disk "$DISK_WARNING" \
-            --stale-count "$STALE_COUNT" --stale-summary "$STALE_SUMMARY" \
-            --scheduler-keys "$SCHEDULER_KEYS" \
+            --stale-count "$STALE_COUNT" --stale-summary="$STALE_SUMMARY" \
+            --scheduler-keys="$SCHEDULER_KEYS" \
             --incomplete "$INCOMPLETE" --test-alert "$TEST_ALERT" || drc=$?
           if [ "$drc" -ne 0 ]; then
             echo "::warning::alert dedupe failed (exit ${drc}); sending undeduplicated, state unchanged."
