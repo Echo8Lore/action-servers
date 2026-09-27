@@ -22,6 +22,7 @@ GitHub repo/org secrets or a local, gitignored config file.
 | `deploy/deploy.sh` | Config-driven local/fallback deploy to a VPS |
 | `deploy/config.example.json` | Per-project deploy config schema |
 | `.github/workflows/deploy.yml` | **Reusable** deploy workflow — projects `uses:` this |
+| `deploy/host-key.sh` | Host-key pinning for both deploy paths: the caller's `VPS_HOST_KEY`, verified with `StrictHostKeyChecking=yes` (warns when unset) |
 | `.github/workflows/runner-health.yml` | Fleet health monitor (cron) — liveness, disk, stale jobs, auto-restart |
 | `.github/workflows/runner-restart.yml` | Parameterized runner restart (dispatch + `workflow_call`) |
 | `.github/workflows/queue-watchdog.yml`, `ops/queue_watchdog.py` | Alerts on jobs stuck in the queue across the fleet's repos (30 min if no runner can take the job, 2 h if runners are just busy; again at 6 h) and says which |

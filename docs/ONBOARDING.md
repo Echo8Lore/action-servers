@@ -81,6 +81,7 @@ Then set these **secrets** on the project repo (or inherit org-level ones):
 | `VPS_SSH_KEY` | SSH private key for the deploy target |
 | `VPS_HOST` | VPS IP/hostname |
 | `VPS_USERNAME` | SSH user |
+| `VPS_HOST_KEY` | (optional, **recommended**) the VPS's public SSH host key, `<type> <base64>` (one line per key; a leading host field is dropped). Every deploy ssh/rsync then verifies it with `StrictHostKeyChecking=yes` and a mismatch fails before anything runs on the host. Unset: the first key the host presents is trusted, with a warning on every run. How to get it: RUNBOOK **Deploy host key**. Can instead be passed as the `vps_host_key` input (not both) |
 | `PRODUCTION_URL` | (optional) base URL for the health check |
 | `DEPLOY_ENV_JSON` | (optional) JSON object written to `.env` on first deploy, e.g. `{"NODE_ENV":"production","PORT":"3000"}` |
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | (optional) deploy success/failure message via Hermes's bot (`ops/notify-telegram.sh`, `sendMessage` only). If either is missing the notify job skips with a notice |
@@ -94,6 +95,11 @@ explicit `secrets:` mapping); action-servers' own secrets are not visible to cal
 > repos under **either** owner. Pin to a tag (`@v1`) so projects aren't broken by infra
 > changes; move the tag forward when you want them to pick up updates.
 
+A host key is public, so the `vps_host_key` input is also fine: in `<type> <base64>`
+form it names no address, and it is reviewable in the caller's diff (a secret can't be
+read back to check which key is pinned). Never put a `<address> <type> <key>` line, or
+an `ssh-keyscan -H` hash, in a public workflow file.
+
 ## 4. Local / first-time deploy (fallback)
 
 ```bash
@@ -102,11 +108,14 @@ cp deploy/config.example.json deploy/config.json   # edit for the project
 ./deploy/deploy.sh                                  # deploy (confirms first)
 ```
 
+Set `target.host_key` in `config.json` (or `VPS_HOST_KEY` in the environment) to pin the
+host key here too; `deploy.sh` needs `deploy/host-key.sh` next to it.
+
 ## Checklist
 
 - [ ] Runner online for the repo (org runner, or a registered repo runner)
 - [ ] `fleet/inventory.yml` updated + committed (personal runners only)
 - [ ] New host? Its host key pinned in `fleet/known_hosts` (same PR as its `hosts:` entry)
 - [ ] `deploy.yml` added to the project, pinned to `@v1`
-- [ ] Deploy secrets set on the project (or org)
+- [ ] Deploy secrets set on the project (or org), including `VPS_HOST_KEY` (fingerprint checked on the host)
 - [ ] First deploy green (containers + health gate pass)

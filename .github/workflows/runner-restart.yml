@@ -8,7 +8,7 @@ name: Restart Self-Hosted Runner
 #   - <PREFIX>_VPS_HOST, <PREFIX>_VPS_USERNAME, <PREFIX>_VPS_SSH_KEY
 #   - RUNNER_HEALTH_PAT (admin scope on the org + personal repos, for the verify step)
 #   - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (optional; outcome notification via
-#     ops/notify-telegram.sh, fetched from Echo8Lore/action-servers main)
+#     ops/notify-telegram.sh, fetched from Echo8Lore/action-servers at job.workflow_sha)
 #
 # Multi-host: the host is chosen by ssh_secret_prefix (the host's value in
 # fleet/inventory.yml), resolved via secrets[format(...)].
@@ -174,10 +174,12 @@ jobs:
         if: success()
         continue-on-error: true
         with:
-          # Public repo, fixed location: works whichever repo calls this workflow.
+          # Public repo, fixed location: works whichever repo calls this workflow. Same
+          # commit as the fleet/ checkout above (OPS-38), not main.
           repository: Echo8Lore/action-servers
-          ref: main
+          ref: ${{ job.workflow_sha }}
           sparse-checkout: ops
+          persist-credentials: false
 
       # Only claims "verified online" when the verify step actually saw it online.
       - name: Telegram notification

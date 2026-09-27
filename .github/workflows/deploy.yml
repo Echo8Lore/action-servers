@@ -14,12 +14,21 @@ name: Reusable Deploy
 #         app_container: myapp_app
 #         proxy_container: myapp_nginx
 #         health_path: /api/health
-#       secrets: inherit
+#       secrets: inherit      # VPS_SSH_KEY, VPS_HOST, VPS_USERNAME, VPS_HOST_KEY, ...
 #
 # Notifications: Telegram (Hermes's bot, via ops/notify-telegram.sh, sendMessage only)
 # when both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID reach this workflow; otherwise the
 # notify job skips with a notice. SLACK_WEBHOOK_URL is still accepted so callers that
 # pass it explicitly keep working, but it is ignored (OPS-35).
+#
+# Host key (OPS-38): pass the VPS's public host key as the VPS_HOST_KEY secret or the
+# vps_host_key input (known_hosts lines, `<type> <base64>`; see deploy/host-key.sh).
+# Every ssh/rsync in the deploy job then verifies it with StrictHostKeyChecking=yes,
+# and a connect-only preflight runs before anything else touches the host, so a key
+# mismatch fails the job with HOST KEY VERIFICATION FAILED before any remote command.
+# Without a pin the old trust-on-first-use behaviour stays, with a ::warning:: on every
+# run. The helper is fetched from this repo at job.workflow_sha (the caller's checkout
+# doesn't have it), like the notifier below.
 
 on:
   workflow_call:
@@ -37,10 +46,12 @@ on:
       db_backup_dir:  { type: string, default: 'backups' }
       db_retain_days: { type: number, default: 30 }
       ref:            { type: string, default: '' }          # checkout ref; '' = triggering ref
+      vps_host_key:   { type: string, default: '' }          # host key pin (or the VPS_HOST_KEY secret); '' = unverified
     secrets:
       VPS_SSH_KEY:       { required: true }
       VPS_HOST:          { required: true }
       VPS_USERNAME:      { required: true }
+      VPS_HOST_KEY:      { required: false }                 # known_hosts line(s) for VPS_HOST; unset = unverified (warns)
       PRODUCTION_URL:    { required: false }                 # health-check base URL
       DEPLOY_ENV_JSON:   { required: false }                 # JSON object -> .env on first deploy
       TELEGRAM_BOT_TOKEN: { required: false }                # deploy notification (with chat id)
@@ -68,19 +79,72 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
 
-      - name: Add VPS to known_hosts
+      # deploy/host-key.sh, from this repo at the commit of this workflow file (see the
+      # notify job's checkout). Not continue-on-error: no helper, no deploy. Excluded
+      # from the rsync below.
+      - name: Fetch host-key helper
+        uses: actions/checkout@v5
+        with:
+          repository: Echo8Lore/action-servers
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: deploy
+          path: .action-servers
+          persist-credentials: false
+
+      # Replaces the old `ssh-keyscan -H >> ~/.ssh/known_hosts`. The known_hosts file is
+      # per run ($RUNNER_TEMP), so a self-hosted runner's ~/.ssh is never touched. The
+      # connect-only `true` is the first thing that reaches the host: a wrong key fails
+      # here, before auth, so no command ever runs.
+      - name: Verify VPS host key
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USERNAME: ${{ secrets.VPS_USERNAME }}
+          KEY_SECRET: ${{ secrets.VPS_HOST_KEY }}
+          KEY_INPUT: ${{ inputs.vps_host_key }}
         run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+          set -euo pipefail
+          if [ -n "$KEY_SECRET" ] && [ -n "$KEY_INPUT" ]; then
+            echo "::error::Both the VPS_HOST_KEY secret and the vps_host_key input are set; pass one."; exit 1
+          fi
+          # shellcheck disable=SC2034  # read by host-key.sh
+          VPS_HOST_KEY="${KEY_SECRET:-$KEY_INPUT}"
+          HELPER="$GITHUB_WORKSPACE/.action-servers/deploy/host-key.sh"
+          KH="$RUNNER_TEMP/deploy_known_hosts"
+          # shellcheck source=/dev/null
+          source "$HELPER"
+          deploy_host_key_setup "$KH"
+          {
+            echo "DEPLOY_HOST_KEY_SH=$HELPER"
+            echo "DEPLOY_KNOWN_HOSTS=$KH"
+            echo "DEPLOY_HOST_PINNED=$DEPLOY_HOST_PINNED"
+          } >> "$GITHUB_ENV"
+          deploy_ssh_opts "$KH" "$DEPLOY_HOST_PINNED"
+          rc=0
+          ssh -n "${DEPLOY_SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=20 \
+            "${VPS_USERNAME}@${VPS_HOST}" true 2> "$RUNNER_TEMP/ssh.err" || rc=$?
+          krc=0
+          deploy_ssh_check "$rc" "$RUNNER_TEMP/ssh.err" || krc=$?
+          [ "$krc" -eq 2 ] && exit 1
+          if [ "$rc" -ne 0 ]; then
+            # Not a host-key failure: show ssh's reason, address redacted (Actions masks
+            # the secret anyway; this also covers a hostname ssh echoes back).
+            ERR=$(cat "$RUNNER_TEMP/ssh.err")
+            echo "::error::SSH to the deploy target failed (exit ${rc}) before deploying:"
+            printf '%s\n' "${ERR//"$VPS_HOST"/<VPS_HOST>}"
+            exit 1
+          fi
+          echo "SSH to the deploy target OK (host key $([ "$DEPLOY_HOST_PINNED" = true ] && echo pinned || echo NOT verified))."
 
       - name: Docker cache cleanup
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USERNAME: ${{ secrets.VPS_USERNAME }}
         run: |
+          # shellcheck source=/dev/null
+          source "$DEPLOY_HOST_KEY_SH"; deploy_ssh_opts "$DEPLOY_KNOWN_HOSTS" "$DEPLOY_HOST_PINNED"
           T=${VPS_USERNAME}@${VPS_HOST}
-          ssh "$T" "sudo docker builder prune --keep-storage 5368709120 -f" 2>/dev/null || true
-          ssh "$T" "sudo docker image prune -a --filter 'until=168h' -f" 2>/dev/null || true
+          ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "sudo docker builder prune --keep-storage 5368709120 -f" 2>/dev/null || true
+          ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "sudo docker image prune -a --filter 'until=168h' -f" 2>/dev/null || true
 
       - name: Pre-deploy DB backup
         if: inputs.db_remote_file != ''
@@ -88,8 +152,10 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USERNAME: ${{ secrets.VPS_USERNAME }}
         run: |
+          # shellcheck source=/dev/null
+          source "$DEPLOY_HOST_KEY_SH"; deploy_ssh_opts "$DEPLOY_KNOWN_HOSTS" "$DEPLOY_HOST_PINNED"
           T=${VPS_USERNAME}@${VPS_HOST}
-          ssh "$T" "
+          ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "
             DB='${{ inputs.app_dir }}/${{ inputs.db_remote_file }}'
             BK='${{ inputs.app_dir }}/${{ inputs.db_backup_dir }}'
             if [ -f \"\$DB\" ]; then
@@ -113,13 +179,18 @@ jobs:
           PROXY_SVC='${{ inputs.proxy_service }}'
           APP_C='${{ inputs.app_container }}'
           DB_REL='${{ inputs.db_remote_file }}'
+          # shellcheck source=/dev/null
+          source "$DEPLOY_HOST_KEY_SH"; deploy_ssh_opts "$DEPLOY_KNOWN_HOSTS" "$DEPLOY_HOST_PINNED"
           T=${VPS_USERNAME}@${VPS_HOST}
           TEMP=/home/${VPS_USERNAME}/app_temp
 
-          ssh "$T" "mkdir -p ${TEMP}"
+          ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "mkdir -p ${TEMP}"
           # Sync working tree (exclude heavy/local artifacts and the live DB).
-          EXCLUDES="--exclude node_modules --exclude .git --exclude '*.db' --exclude _qa --exclude test-results --exclude playwright-report"
-          rsync -avz --delete $EXCLUDES ./ "${T}:${TEMP}/"
+          EXCLUDES="--exclude node_modules --exclude .git --exclude '*.db' --exclude _qa --exclude test-results --exclude playwright-report --exclude .action-servers"
+          # Same pinned options for rsync's ssh; rsync splits -e on spaces but honours
+          # single quotes (a runner path may contain spaces).
+          RSH="ssh$(printf " '%s'" "${DEPLOY_SSH_OPTS[@]}")"
+          rsync -avz --delete -e "$RSH" $EXCLUDES ./ "${T}:${TEMP}/"
 
           # Build the remote deploy script. DB file (if any) is preserved in place.
           DB_EXCLUDE=""
@@ -132,7 +203,7 @@ jobs:
             ENV_WRITE=$(printf "if [ ! -f .env ]; then cat > .env <<'DOTENV'\n%s\nDOTENV\nchmod 600 .env; fi" "$ENV_KV")
           fi
 
-          ssh "$T" bash -s <<REMOTE
+          ssh "${DEPLOY_SSH_OPTS[@]}" "$T" bash -s <<REMOTE
           set -e
           sudo rsync -av ${DB_EXCLUDE} ${TEMP}/ ${APP_DIR}/
           sudo chown -R ${VPS_USERNAME}:${VPS_USERNAME} ${APP_DIR}
@@ -150,16 +221,18 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USERNAME: ${{ secrets.VPS_USERNAME }}
         run: |
+          # shellcheck source=/dev/null
+          source "$DEPLOY_HOST_KEY_SH"; deploy_ssh_opts "$DEPLOY_KNOWN_HOSTS" "$DEPLOY_HOST_PINNED"
           T=${VPS_USERNAME}@${VPS_HOST}
           sleep 10
-          app=$(ssh "$T" "docker ps -q -f name=${{ inputs.app_container }} -f status=running")
+          app=$(ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "docker ps -q -f name=${{ inputs.app_container }} -f status=running")
           if [ -z "$app" ]; then
             echo "::error::App container '${{ inputs.app_container }}' not running."
-            ssh "$T" "docker ps -a"; exit 1
+            ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "docker ps -a"; exit 1
           fi
           if [ -n "${{ inputs.proxy_container }}" ]; then
-            proxy=$(ssh "$T" "docker ps -q -f name=${{ inputs.proxy_container }} -f status=running")
-            [ -z "$proxy" ] && { echo "::error::Proxy container not running."; ssh "$T" "docker ps -a"; exit 1; }
+            proxy=$(ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "docker ps -q -f name=${{ inputs.proxy_container }} -f status=running")
+            [ -z "$proxy" ] && { echo "::error::Proxy container not running."; ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "docker ps -a"; exit 1; }
           fi
           echo "Container(s) running."
 
