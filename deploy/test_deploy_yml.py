@@ -32,7 +32,7 @@ DEPLOY_YML = ROOT / ".github" / "workflows" / "deploy.yml"
 
 # A dotted quad not glued to a word or another dot-number: skips v1.2.3.4 and
 # 1.2.3.4.5, still matches an address that ends a sentence ("... 192.0.2.1.").
-IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\w)")
+IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 # Hex groups and colons: starts with a hex group, has at least two colons, not glued
 # to a word, colon or dot (so host:port, times and 0.0.0.0:22 don't start a match).
 # Leading-"::" forms (::1, ::add-mask::, a[::2]) are never public, so they're skipped.
@@ -125,7 +125,8 @@ class Matcher(unittest.TestCase):
     def test_global_addresses_are_flagged(self):
         for line in (f'"ip": "{self.GLOBAL4}"', f"ends a sentence {self.GLOBAL4}.",
                      f"{self.GLOBAL4}:22", f"inet6 {self.GLOBAL6}/64",
-                     f"[{self.GLOBAL6}]:443", f"to {self.GLOBAL6}."):
+                     f"[{self.GLOBAL6}]:443", f"to {self.GLOBAL6}.",
+                     f"https://{self.GLOBAL4}.nip.io/"):
             self.assertEqual(len(public_addresses(line)), 1, line)
 
     def test_non_addresses_are_ignored(self):
