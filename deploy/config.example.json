@@ -2,7 +2,7 @@
   "_comment": "Per-project deploy config. Copy to deploy/config.json (gitignored) and fill in. Used by deploy/deploy.sh. The reusable GitHub workflow takes the same values as workflow inputs/secrets instead of this file.",
 
   "target": {
-    "ip": "15.204.92.213",
+    "ip": "203.0.113.10",
     "domain": "myapp.example.com",
     "ssh_port": 22,
     "_comment_host_key": "Optional but recommended: the VPS's public SSH host key, '<type> <base64>' (no address needed), e.g. from: ssh-keyscan -t ed25519 <ip> | cut -d' ' -f2-  (check the fingerprint on the host first; docs/RUNBOOK.md 'Deploy host key'). Set: StrictHostKeyChecking=yes. Unset: accept-new with a warning. VPS_HOST_KEY in the environment overrides it.",
