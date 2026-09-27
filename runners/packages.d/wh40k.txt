@@ -1,0 +1,7 @@
+# ResearchMonkey/warhammer-40k-database — system libraries its CI needs.
+# One package per line; "a | b" installs the first with an apt candidate.
+# Applied to every CI host by runners/bootstrap-host.sh (OPS-46).
+
+# pyzbar loads the zbar shared library at import time (app-tests).
+# Renamed in Ubuntu 24.04's t64 transition; 22.04 still has libzbar0.
+libzbar0t64 | libzbar0

@@ -2,7 +2,9 @@
 # collect-host.sh — runner-side driver for one host leg of fleet-inventory.yml.
 #
 # Inputs (env): HOST_ID, PREFIX, SSH_HOST, SSH_USER, SSH_KEY, DOMAINS (comma list),
-#               GPG_PUBKEY (optional ASCII-armored public key)
+#               GPG_PUBKEY (optional ASCII-armored public key),
+#               ROLE (parity role from `fleet_facts.py hosts`; empty/unset = the host's
+#                     apt package names are not published)
 # Output: out/<HOST_ID>.json            public facts (no IPs, ports, images, server_names)
 #         out/fleet-full-<HOST_ID>.json.gpg   full facts, only if GPG_PUBKEY is set
 #
@@ -83,6 +85,7 @@ done < <($FACTS ips "$WORK/full.json")
 # Written to a temp file and moved into place only on success, so a crash never
 # uploads an empty/partial host file.
 if $FACTS public "$WORK/full.json" --id "$HOST_ID" --target "$SSH_HOST" --domains "${DOMAINS:-}" \
+     --role "${ROLE:-}" \
      > "$WORK/public.json" 2> "$WORK/public.err"; then
   mv "$WORK/public.json" "${OUT}/${HOST_ID}.json"
 else

@@ -2,8 +2,8 @@ name: Fleet Inventory
 
 # Polls every host in fleet/inventory.yml over SSH (READ-ONLY; fleet/collect-facts.sh)
 # and reports what is actually there: hostname, OS, uptime, disk /, memory, runner
-# systemd units, nginx / docker / listening-port presence, and which host each
-# configured domain's DNS records point at. Host facts are polled, not remembered.
+# systemd units, nginx / docker / listening-port presence, which host each
+# configured domain's DNS records point at, and package parity between CI hosts. Host facts are polled, not remembered.
 #
 # WHAT IS PUBLISHED, AND WHY. This repo is public: job logs, the step summary and
 # artifacts are all readable by any logged-in GitHub user. Host addresses are kept in
@@ -12,7 +12,11 @@ name: Fleet Inventory
 #   - Every discovered IP is ::add-mask::ed before anything is printed, and the raw
 #     collector output is never printed.
 #   - The public report (artifact + summary) carries host-id <-> domain matches,
-#     counts, runner units and drift. It does NOT carry IP addresses, listening ports,
+#     counts, runner units and drift, and package parity (OPS-46): only the package
+#     names that DIFFER between hosts of the same role, plus per-host counts. Full
+#     apt-mark showmanual lists travel only in the 1-day per-host artifacts, and only
+#     for hosts in a role (runner hosts); a host with no role (hosting-vps) publishes
+#     none. It does NOT carry IP addresses, listening ports,
 #     container names/images or nginx server_name lists: together those are a recon map
 #     of the fleet, and none of them are needed for the drift / domain questions.
 #   - The FULL facts (including those fields) are kept only GPG-encrypted, and only if
@@ -57,7 +61,9 @@ jobs:
       - name: Read hosts + domains
         id: inv
         run: |
-          echo "hosts=$(yq -o=json -I=0 '.hosts' fleet/inventory.yml)" >> "$GITHUB_OUTPUT"
+          # Each host gains its package-parity role (runner hosts = ci; "" = none).
+          yq -o=json '.' fleet/inventory.yml > "$RUNNER_TEMP/inventory.json"
+          echo "hosts=$(python3 fleet/fleet_facts.py hosts "$RUNNER_TEMP/inventory.json")" >> "$GITHUB_OUTPUT"
           echo "domains=$(yq -r '.domains // [] | join(",")' fleet/inventory.yml)" >> "$GITHUB_OUTPUT"
 
   collect:
@@ -81,6 +87,7 @@ jobs:
           SSH_KEY: ${{ secrets[format('{0}_VPS_SSH_KEY', matrix.host.ssh_secret_prefix)] }}
           DOMAINS: ${{ needs.load-inventory.outputs.domains }}
           GPG_PUBKEY: ${{ vars.FLEET_REPORT_GPG_PUBKEY }}
+          ROLE: ${{ matrix.host.role }}
         run: bash fleet/collect-host.sh
 
       # always(): out/ only ever holds the public JSON and the encrypted file (the

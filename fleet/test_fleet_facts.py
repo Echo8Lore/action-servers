@@ -9,7 +9,11 @@ What they pin:
   2. Runner drift: missing / misplaced / extra / unverified.
   3. Degraded input never takes the pipeline down: empty or absent sections, truncated
      collector output, malformed host files, a bad GPG key, a failed SSH.
-  4. Host keys (OPS-33): the driver only connects with the pinned-key options, refuses
+  4. Package parity (OPS-46): apt-mark showmanual is compared between hosts of the
+     same role (runner hosts = "ci"; hosting-vps has no role). Only well-formed names
+     are kept; a host with no role publishes none; the 30-day report carries only
+     counts plus the names that differ.
+  5. Host keys (OPS-33): the driver only connects with the pinned-key options, refuses
      a host with no pin, and fails loudly (without leaking an address) on a mismatch.
 DNS is stubbed and the driver runs with a stub ssh; nothing here touches the network.
 """
@@ -71,11 +75,19 @@ api-blue\tsecretcorp/api:1.2.3
 0.0.0.0:22
 198.51.100.7:8443
 127.0.0.1:5432
+@@@ apt_manual
+docker-ce
+gh
+libzbar0t64
+203.0.113.10
+Not A Package; rm -rf
+__END__
 @@@ end
 """
 
 SECTIONS = ["hostname", "os_release", "kernel", "uptime", "disk_root", "meminfo", "ip_addrs",
-            "runner_units", "runner_unit_files", "nginx_server_names", "docker", "listening_tcp"]
+            "runner_units", "runner_unit_files", "nginx_server_names", "docker", "listening_tcp",
+            "apt_manual"]
 
 DNS = {"weaponslore.com": ["192.0.2.1", "203.0.113.10"]}
 
@@ -136,6 +148,152 @@ def ok_host(hid, units):
     return {"id": hid, "status": "ok",
             "runner_units": [{"unit": u, "load": "loaded", "active": "active", "sub": "running"} for u in units],
             "runner_unit_files": [], "domains": []}
+
+
+def apt_host(hid, pkgs):
+    h = ok_host(hid, [])
+    h["apt_manual"] = {"state": "present", "packages": sorted(pkgs)}
+    return h
+
+
+# The fleet as of 2026-09-27 (OPS-46): CI-2 was bootstrapped fresh and then topped up
+# by hand, so it has everything CI-1 has plus three packages bootstrap-host.sh installs.
+BASE = {"build-essential", "curl", "docker-buildx-plugin", "docker-ce", "gh", "git", "htop",
+        "jq", "libzbar0t64", "python3-pip", "python3-venv"}
+INV = {"hosts": [{"id": "ovh-staging"}, {"id": "ovh-devops-001"}, {"id": "hosting-vps"}],
+       "runners": [{"host": "ovh-staging", "systemd_unit": "actions.runner.A.a.service"},
+                   {"host": "ovh-devops-001", "systemd_unit": "actions.runner.B.b.service"}]}
+
+
+class PackageParity(unittest.TestCase):
+    def fleet(self):
+        return [apt_host("ovh-staging", BASE),
+                apt_host("ovh-devops-001", BASE | {"docker-compose-plugin", "unzip", "wget"}),
+                {**ok_host("hosting-vps", []), "apt_manual": {"state": "not_compared", "package_count": 1}}]
+
+    def report(self, hosts):
+        with tempfile.TemporaryDirectory() as t:
+            for h in hosts:
+                (pathlib.Path(t) / f"{h['id']}.json").write_text(json.dumps(h))
+            with contextlib.redirect_stdout(io.StringIO()):
+                return ff.build_report(INV, t, records)
+
+    def test_report_json_carries_no_package_lists(self):
+        hosts = self.fleet()
+        # Even a leg that (wrongly) shipped a roleless host's list gets cut to a count.
+        hosts[2] = apt_host("hosting-vps", {"nginx", "secret-sauce"})
+        rep = self.report(hosts)
+
+        def walk(x):
+            if isinstance(x, dict):
+                self.assertNotIn("packages", x)
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+        walk(rep)
+        blob = json.dumps(rep) + ff.markdown(rep)
+        for p in BASE | {"nginx", "secret-sauce"}:
+            self.assertNotIn(f'"{p}"', blob)
+        apt = {h["id"]: h["apt_manual"] for h in rep["hosts"]}
+        self.assertEqual(apt["ovh-staging"], {"state": "present", "package_count": len(BASE)})
+        self.assertEqual(apt["hosting-vps"], {"state": "present", "package_count": 2})
+        # The names that differ are all the report publishes.
+        self.assertEqual(sorted(d["package"] for d in rep["package_parity"][0]["differences"]),
+                         ["docker-compose-plugin", "unzip", "wget"])
+
+    def test_parse_keeps_only_package_names(self):
+        full = ff.parse_raw(RAW)
+        self.assertEqual(full["apt_manual"], {"state": "present",
+                                              "packages": ["docker-ce", "gh", "libzbar0t64"]})
+        pub = ff.make_public(full, "h", "", [], records, role="ci")
+        self.assertEqual(pub["apt_manual"]["packages"], ["docker-ce", "gh", "libzbar0t64"])
+
+    def test_roleless_host_publishes_no_names(self):
+        full = ff.parse_raw(RAW)
+        for role in ("", None):
+            pub = ff.make_public(full, "hosting-vps", "", [], records, role=role)
+            self.assertEqual(pub["apt_manual"], {"state": "not_compared", "package_count": 3})
+            self.assertNotIn("libzbar0t64", json.dumps(pub))
+        # The default is roleless, so a caller that forgets the role fails closed.
+        self.assertNotIn("packages", ff.make_public(full, "h", "", [], records)["apt_manual"])
+
+    def test_matrix_hosts_carry_role(self):
+        got = {h["id"]: h for h in ff.matrix_hosts(INV)}
+        self.assertEqual({k: v["role"] for k, v in got.items()},
+                         {"ovh-staging": "ci", "ovh-devops-001": "ci", "hosting-vps": ""})
+        with tempfile.TemporaryDirectory() as t:
+            f = pathlib.Path(t) / "inv.json"
+            f.write_text(json.dumps(dict(INV, hosts=[{"id": "ovh-staging", "ssh_secret_prefix": "DEVOPS"}])))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                ff.main(["hosts", str(f)])
+        self.assertEqual(json.loads(out.getvalue()),
+                         [{"id": "ovh-staging", "ssh_secret_prefix": "DEVOPS", "role": "ci"}])
+
+    def test_old_collector_and_absent_section(self):
+        old = RAW.split("@@@ apt_manual")[0] + "@@@ end\n"
+        self.assertEqual(ff.parse_raw(old)["apt_manual"], {"state": "absent", "reason": "not collected"})
+        gone = RAW.split("@@@ apt_manual")[0] + "@@@ apt_manual\n__ABSENT__ apt-mark not installed\n@@@ end\n"
+        pub = ff.make_public(ff.parse_raw(gone), "h", "", [], records, role="ci")
+        self.assertEqual(pub["apt_manual"], {"state": "absent", "reason": "apt-mark not installed"})
+
+    def test_roles(self):
+        roles = ff.host_roles(INV)
+        self.assertEqual(roles, {"ovh-staging": "ci", "ovh-devops-001": "ci", "hosting-vps": None})
+        inv = dict(INV, hosts=INV["hosts"][:2] + [{"id": "hosting-vps", "role": "web"}])
+        self.assertEqual(ff.host_roles(inv)["hosting-vps"], "web")
+
+    def test_ci1_lacks_what_ci2_was_bootstrapped_with(self):
+        [g] = ff.package_parity(INV, self.fleet())   # hosting-vps: no role, no group
+        self.assertEqual(g["role"], "ci")
+        self.assertEqual(g["compared"], ["ovh-devops-001", "ovh-staging"])
+        self.assertEqual(g["unverified"], [])
+        self.assertEqual(g["differences"], [
+            {"package": p, "present_on": ["ovh-devops-001"], "missing_on": ["ovh-staging"]}
+            for p in ("docker-compose-plugin", "unzip", "wget")])
+
+    def test_report_warns_and_summarises(self):
+        rep = self.report(self.fleet())
+        self.assertIn("package parity (ci): ovh-staging lacks docker-compose-plugin, unzip, wget "
+                      "(installed on other ci hosts)", rep["warnings"])
+        self.assertFalse(any("hosting-vps" in w or "nginx" in w for w in rep["warnings"]))
+        md = ff.markdown(rep)
+        self.assertIn("| unzip | ovh-devops-001 | **ovh-staging** |", md)
+        self.assertIn("**ci** (ovh-staging, ovh-devops-001)", md)
+
+    def test_parity_clean(self):
+        hosts = [apt_host("ovh-staging", BASE), apt_host("ovh-devops-001", BASE)]
+        [g] = ff.package_parity(INV, hosts)
+        self.assertEqual(g["differences"], [])
+        rep = {"generated_at": "x", "hosts": hosts, "domains": [], "drift": ff.drift(INV, hosts),
+               "package_parity": [g]}
+        self.assertFalse(any("package parity" in w for w in ff.warnings(rep)))
+        self.assertIn("No differences between ovh-devops-001, ovh-staging.", ff.markdown(rep))
+
+    def test_unreadable_hosts_are_unverified_not_differences(self):
+        no_apt = ok_host("ovh-devops-001", [])
+        [g] = ff.package_parity(INV, [apt_host("ovh-staging", BASE), no_apt])
+        self.assertEqual(g["differences"], [])
+        self.assertEqual(g["unverified"], [{"host": "ovh-devops-001", "reason": "apt_manual not collected"}])
+        rep = {"hosts": [], "domains": [], "drift": {"missing": [], "misplaced": [], "extra": []},
+               "package_parity": [g]}
+        self.assertEqual(ff.warnings(rep),
+                         ["package parity (ci): ovh-devops-001 not compared (apt_manual not collected)"])
+        # An unreachable host is warned about once, as unreachable, not again here.
+        [g] = ff.package_parity(INV, [apt_host("ovh-staging", BASE), {"id": "ovh-devops-001", "status": "unreachable"}])
+        self.assertEqual(g["unverified"], [{"host": "ovh-devops-001", "reason": "unreachable"}])
+        self.assertEqual(ff.warnings(dict(rep, package_parity=[g])), [])
+
+    def test_garbage_apt_values_never_raise(self):
+        for apt in (None, [], "x", {"state": "present"}, {"state": "present", "packages": [1, None, "gh"]}):
+            h = ok_host("ovh-devops-001", [])
+            h["apt_manual"] = apt
+            ff.package_parity(INV, [apt_host("ovh-staging", BASE), h])
+        pub = ff.make_public({"apt_manual": {"state": "present", "packages": [1, "gh", "10.1.2.3"]}},
+                             "h", "", [], records, role="ci")
+        self.assertEqual(pub["apt_manual"]["packages"], ["gh"])
 
 
 class Drift(unittest.TestCase):
@@ -235,7 +393,7 @@ class CollectHostScript(unittest.TestCase):
             kh.write_text("# test pins\nh ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCudSiOiYSZ8iHzEm+r5pwFYXNktWqGFW3aXJMbn/pY\n")
             e = dict(os.environ, HOST_ID="h", PREFIX="P", SSH_HOST="192.0.2.50", SSH_USER="u",
                      SSH_KEY="dummy", DOMAINS="", SSH_CMD=str(stub), OUT_DIR=str(t / "out"),
-                     PINNED_KNOWN_HOSTS=str(kh))
+                     PINNED_KNOWN_HOSTS=str(kh), ROLE="")
             if fail_python_subcommand:
                 # A python3 first on PATH that runs the real interpreter, except that it
                 # fails the named fleet_facts.py subcommand.
@@ -315,6 +473,15 @@ class CollectHostScript(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("h.json", outs)
         self.assertEqual(json.loads(outs["h.json"])["status"], "collect_failed")
+
+    def test_role_decides_whether_the_leg_ships_package_names(self):
+        body = "cat <<'EOF'\n" + RAW + "EOF"
+        _, outs = self.run_host(body)                       # ROLE unset: roleless
+        self.assertEqual(json.loads(outs["h.json"])["apt_manual"]["state"], "not_compared")
+        self.assertNotIn("libzbar0t64", outs["h.json"])
+        _, outs = self.run_host(body, ROLE="ci")
+        self.assertEqual(json.loads(outs["h.json"])["apt_manual"]["packages"],
+                         ["docker-ce", "gh", "libzbar0t64"])
 
     def test_bad_gpg_key_still_ships_public_json(self):
         body = "cat <<'EOF'\n" + RAW + "EOF"
