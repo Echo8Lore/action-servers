@@ -108,8 +108,12 @@ cp deploy/config.example.json deploy/config.json   # edit for the project
 ./deploy/deploy.sh                                  # deploy (confirms first)
 ```
 
-Set `target.host_key` in `config.json` (or `VPS_HOST_KEY` in the environment) to pin the
-host key here too; `deploy.sh` needs `deploy/host-key.sh` next to it.
+Set `target.host_key` in `config.json` to the VPS's real host key, `<type> <base64>`
+(get and check it as in RUNBOOK **Deploy host key**), or `VPS_HOST_KEY` in the
+environment, which wins. The example's `ssh-ed25519 AAAA...` placeholder deliberately
+fails closed: `deploy.sh` refuses to connect until you replace it with the real key, or
+delete the `host_key` line to run unpinned (accept-new, with a warning).
+`deploy.sh` needs `deploy/host-key.sh` next to it.
 
 ## Checklist
 

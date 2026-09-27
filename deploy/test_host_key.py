@@ -105,12 +105,14 @@ class Setup(unittest.TestCase):
             "ssh-ed25519 aGVsbG8gd29ybGQ=",              # base64, but not an ed25519 key
             f"{ED}\ngarbage line",                       # one bad line spoils the pin
             "ssh-foo AAAAC3NzaC1lZDI1NTE5",
+            f"{ED}\nssh-ed25519 aGVsbG8gd29ybGQ=",       # one real key + one well-formed junk
         ]
         for key in bad:
             p = self.setup(key)
             self.assertIn("rc=1 pinned=false", p.stdout, key)
             self.assertIn("::error::VPS_HOST_KEY is set but is not valid", p.stdout, key)
             self.assertNotIn(ADDR, p.stdout + p.stderr)
+            self.assertFalse(self.kh.exists(), f"half-written pin left behind: {key!r}")
 
 
 class Opts(unittest.TestCase):
@@ -241,6 +243,18 @@ class DeploySh(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertIn("::error::VPS_HOST_KEY is set but is not valid", p.stdout)
         self.assertEqual(calls, [])
+
+    def test_every_ssh_carries_the_options(self):
+        # Static: the stubbed runs stop early, so later ssh calls are checked in the source.
+        seen = 0
+        for ln in DEPLOY_SH.read_text().splitlines():
+            code = ln.strip()
+            if code.startswith("#") or code.startswith("for cmd in") or code.startswith("echo"):
+                continue  # comments, the `command -v` loop, printed hints
+            for m in re.finditer(r"(?:^|[\s(|;{])ssh ", code):
+                seen += 1
+                self.assertRegex(code[m.end():], r'^(-n )?"\$\{SSH_OPTS\[@\]\}"', code)
+        self.assertGreaterEqual(seen, 6)
 
     def test_unpinned_warns_and_keeps_accept_new(self):
         p, calls = self.run_deploy('echo "Permission denied (publickey)." >&2; exit 255')

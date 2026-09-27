@@ -54,10 +54,14 @@ deploy_host_key_setup() {
     n=$((n + 1))
   done <<< "$VPS_HOST_KEY"
   # ssh-keygen parses every line for real (a blob that is valid base64 but not a key of
-  # its type fails here). Its output names only the alias, never an address.
-  if [ "$bad" -ne 0 ] || [ "$n" -eq 0 ] || ! ssh-keygen -l -f "$kh" > "$kh.fp" 2>/dev/null; then
-    echo "::error::VPS_HOST_KEY is set but is not valid known_hosts data (${bad} unparseable line(s), ${n} key(s)). Expected '<type> <base64>' per line, e.g. the output of: ssh-keyscan -t ed25519 <address> | cut -d' ' -f2-. Not deploying unverified (action-servers docs/RUNBOOK.md, Deploy host key)."
-    rm -f "$kh.fp"
+  # its type is skipped). It exits 0 if ANY line parses, so every line must yield a
+  # fingerprint. Its output names only the alias, never an address.
+  local ok=0
+  [ "$n" -gt 0 ] && ssh-keygen -l -f "$kh" > "$kh.fp" 2>/dev/null && ok=$(wc -l < "$kh.fp")
+  if [ "$bad" -ne 0 ] || [ "$n" -eq 0 ] || [ "$ok" -ne "$n" ]; then
+    echo "::error::VPS_HOST_KEY is set but is not valid known_hosts data (${bad} unparseable line(s); ${ok} of ${n} key line(s) are real keys). Expected '<type> <base64>' per line, e.g. the output of: ssh-keyscan -t ed25519 <address> | cut -d' ' -f2-. Not deploying unverified (action-servers docs/RUNBOOK.md, Deploy host key)."
+    # No half-written pin left behind for a caller that ignores the return code.
+    rm -f "$kh" "$kh.fp"
     return 1
   fi
   DEPLOY_HOST_PINNED=true

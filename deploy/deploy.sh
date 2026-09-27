@@ -204,7 +204,14 @@ if [ "$GATES_PASSED" -eq "$GATES_TOTAL" ]; then
   echo "  DEPLOY SUCCESSFUL — $GATES_PASSED/$GATES_TOTAL gates"
 else
   echo "  DEPLOY COMPLETED WITH ISSUES — $GATES_PASSED/$GATES_TOTAL gates"
-  echo "  Debug: ssh $SSH_TARGET 'sudo docker ps -a && sudo docker logs $PRIMARY'"
+  # Not a bare `ssh $SSH_TARGET`: that would skip the pin. The per-run pin file is gone
+  # after exit, so a pinned hint names what to put in one.
+  if [ "$DEPLOY_HOST_PINNED" = true ]; then
+    echo "  Debug (pinned; <kh> = a file with the line 'deploy-target <your host_key>'):"
+    echo "    ssh -p $VPS_PORT -o HostKeyAlias=deploy-target -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<kh> $SSH_TARGET 'sudo docker ps -a && sudo docker logs $PRIMARY'"
+  else
+    echo "  Debug: ssh ${SSH_OPTS[*]} $SSH_TARGET 'sudo docker ps -a && sudo docker logs $PRIMARY'"
+  fi
 fi
 echo "  Rollback is code-only (re-deploy a previous ref). DB migrations are forward-only."
 echo "=========================================="
