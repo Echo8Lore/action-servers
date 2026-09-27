@@ -19,7 +19,9 @@ import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+_WF = ROOT / ".github" / "workflows"
+# GitHub loads both extensions; a .yaml workflow must not slip past these checks.
+WORKFLOWS = sorted([*_WF.glob("*.yml"), *_WF.glob("*.yaml")])
 
 # First Node 24 major of each first-party action (checked against each release's
 # action.yml, 2026-09-27). actions/cache/restore and /save share actions/cache's tag.
