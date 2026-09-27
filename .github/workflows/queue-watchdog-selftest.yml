@@ -10,7 +10,7 @@ name: Queue Watchdog Self-Test
 #   4. CANCEL THIS RUN:               gh run cancel <run-id>
 #
 # Always do step 4, promptly. The drill page is recorded against threshold 1, so a
-# forgotten run pages AGAIN when a scheduled scan sees it past the normal 30 min, again
+# forgotten run pages AGAIN when a later scan sees it past the normal 30 min, again
 # at 6 h, and only ends when GitHub cancels it at its 24 h queue limit. (timeout-minutes
 # below does not help: it limits execution time, and this job never starts.)
 #

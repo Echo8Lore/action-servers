@@ -15,10 +15,15 @@ name: Queue Watchdog
 # in fleet/inventory.yml, plus its `watch_repos:` list (repos whose runners the
 # inventory does not track).
 #
-# CADENCE. The 30-minute target is only as good as the trigger. GitHub throttles cron
-# to roughly 6 runs/day, so this schedule alone can notice a stuck job hours late;
-# moving the trigger to a systemd timer (OPS-23) is what makes 30 minutes real. Until
-# then, run it by hand (workflow_dispatch) when a job looks stuck.
+# CADENCE (OPS-23). The thresholds are only as good as the trigger. The cron below
+# DECLARES every 30 min, but GitHub throttles sub-daily cron to ~6 runs/day, so on cron
+# alone a stuck job can be noticed hours late. The real trigger is workflow_dispatch
+# from the fleet-dispatch timers on both CI boxes (ops/fleet-dispatch.sh,
+# ops/systemd/): slot a (ovh-staging) at :00/:20/:40, slot b (ovh-devops-001) at
+# :10/:30/:50 -> a scan every 10 min with both boxes, every 20 min with one, and back to
+# the throttled cron with none (runner-health's check-scheduler then warns "scheduler
+# degraded"). The cron stays as that backstop. A job is paged within about one scan
+# interval of its threshold. When in doubt, dispatch it by hand.
 #
 # Why a separate workflow and not runner-health's check-stale-jobs: that job looks at
 # runs IN PROGRESS for over 60 min (a slow or hung job) and alerts every run; this one
@@ -48,7 +53,7 @@ name: Queue Watchdog
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # throttled by GitHub; see CADENCE above
+    - cron: '*/30 * * * *'   # declared every 30 min, throttled to ~6/day: backstop only (CADENCE)
   workflow_dispatch:
     inputs:
       threshold_minutes:

@@ -1,13 +1,30 @@
 # Fleet runbook
 
 Day-2 operations for the runner fleet and deploys. Most of this is automated by
-`runner-health.yml` (hourly); this is the manual fallback and reference.
+`runner-health.yml`; this is the manual fallback and reference.
+
+**How often the monitors really run** (OPS-23). GitHub throttles every sub-daily cron
+to about 6 runs/day, whatever the cron says. The cadence comes from the dispatch timers
+on the two CI boxes (**Fleet dispatch timers** below):
+
+| Monitor | Both CI boxes' timers up | One box | Cron backstop only |
+|---|---|---|---|
+| `runner-health.yml` (liveness, disk, stale jobs, auto-restart) | every 30 min | hourly | ~every 4-5 h |
+| `queue-watchdog.yml` (jobs stuck in the queue) | every 10 min | every 20 min | ~every 4-5 h |
+
+Because runner-health can run every 30 min, its Telegram alert is deduplicated
+(`ops/alert_dedupe.py`): an incident pages when it starts, when its set of conditions
+changes (another runner goes offline, a new stale run, a scheduler finding), every 6 h
+while unchanged ("REPEAT"), and once more as "RESOLVED - fleet healthy" when everything
+clears. Auto-restart only notifies a restart that brought the runner back online; a
+runner that stays offline is the monitor's CRITICAL. A **Run workflow** with
+`test_alert` always sends.
 
 ## Quick reference
 
 | Symptom | Action |
 |---|---|
-| Runner shows offline | Auto-restart fires hourly; force it: run **Restart Self-Hosted Runner** with the runner's name + unit, or `systemctl restart <unit>` on the host |
+| Runner shows offline | Auto-restart fires on every monitor run (cadence above); force it: run **Restart Self-Hosted Runner** with the runner's name + unit, or `systemctl restart <unit>` on the host |
 | Disk >85% on host | `docker system prune` / `builder prune` (below) |
 | Job stuck in-progress >60m | Cancel the run in the Actions UI; check the runner is healthy |
 | Deploy failed | Re-run the deploy workflow; or `deploy/deploy.sh` locally; rollback = re-deploy previous ref |
@@ -19,6 +36,8 @@ Day-2 operations for the runner fleet and deploys. Most of this is automated by
 | `HOST KEY VERIFICATION FAILED` in a deploy | The project's VPS presented a key other than its `VPS_HOST_KEY`. Nothing ran on the host. Verify as in **Host key changed** steps 1-2, then update the project's pin: **Deploy host key** |
 | `Deploy host key NOT verified` warning | The caller passes no `VPS_HOST_KEY`: pin it (**Deploy host key**) |
 | Unsure which host serves a domain, or what runs where | Run **Fleet Inventory** (daily; dispatchable) and read its step summary. Poll, don't trust notes |
+| Alert: "scheduler degraded: dispatch timers not firing" | Neither CI box has dispatched that workflow for ~2.5 h: the monitors are back on the throttled cron (~6/day). Usually an expired/revoked PAT (both boxes fail at once) or both boxes down. See **Fleet dispatch timers → Troubleshooting** |
+| Alert: "NOTICE - dispatch slot a/b (<host>) not firing" | One box's timers are silent; cadence is at half rate. That box is down (the same run likely reports its runners offline / SSH failing), or its timers or `.env` are broken. See **Troubleshooting** |
 
 ## Runners
 
@@ -73,6 +92,11 @@ Then confirm the runner that was holding it is online (restart if not).
 - **Runner registration tokens** are short-lived (≈1h) — mint fresh each time.
 - **`RUNNER_HEALTH_PAT`** (admin scope on org + personal repos) powers the monitor and
   restart-verify. Rotate by issuing a new PAT and updating the secret on this repo.
+- **`FLEET_DISPATCH_TOKEN`** (fine-grained PAT, Actions read/write on
+  `Echo8Lore/action-servers` only) lets the CI boxes' timers dispatch the monitors. Not a
+  GitHub secret: canonical copy in Bitwarden, runtime copy in
+  `/home/wl_admin/.config/fleet-dispatch/.env` (0600 `wl_admin`) on each CI box. Rotate:
+  **Fleet dispatch timers → Rotate the PAT**.
 - **`<PREFIX>_VPS_*`** secrets are the SSH path the monitor/restart/inventory use to
   reach each host: `DEVOPS` (ovh-staging), `DEVOPS001` (ovh-devops-001), `HOSTING`
   (hosting-vps). Rotate the key on the host and update that prefix's `_VPS_SSH_KEY`.
@@ -81,6 +105,200 @@ Then confirm the runner that was holding it is online (restart if not).
 - **Host keys** are not secrets: each fleet host's ED25519 key is committed in
   `fleet/known_hosts` under its inventory id, and every fleet SSH call (inventory,
   disk check, restart) verifies it with `StrictHostKeyChecking=yes` (OPS-33).
+
+## Fleet dispatch timers
+
+GitHub throttles sub-daily cron to ~6 runs/day (OPS-23), but does not throttle
+`workflow_dispatch`. So a systemd timer on **each** CI box dispatches the cadence-bound
+workflows through the REST API
+(`POST /repos/Echo8Lore/action-servers/actions/workflows/<file>/dispatches`, ref
+`main`). The workflows still run on GitHub-hosted runners: the boxes only pull the
+trigger, so a monitor never runs on a host it monitors. The two boxes interleave, so
+together they give the target cadence and either one alone gives half of it. The crons
+stay in the workflows as the backstop.
+
+| Slot | Box | `runner-health.yml` | `queue-watchdog.yml` |
+|---|---|---|---|
+| a | `ovh-staging` (CI-1) | :00 | :00, :20, :40 |
+| b | `ovh-devops-001` (CI-2) | :30 | :10, :30, :50 |
+
+Times are UTC. The source of truth is `ops/systemd/fleet-dispatch.schedule`; the
+installer and the liveness check both read it.
+
+What goes on each box (`ops/install-fleet-dispatch.sh`):
+
+| Path | What |
+|---|---|
+| `/usr/local/bin/fleet-dispatch` | `ops/fleet-dispatch.sh`: dispatches one workflow. Allowlisted to `runner-health.yml` and `queue-watchdog.yml`; retries 5xx/network errors twice, never 4xx; one journal line per run |
+| `/etc/systemd/system/fleet-dispatch@.service` | oneshot, `User=wl_admin`, sandboxed (`ProtectSystem=strict`, `ProtectHome=yes`, `NoNewPrivileges`, ...) |
+| `/etc/systemd/system/fleet-dispatch@.timer` + `fleet-dispatch@<name>.timer.d/10-slot.conf` | the timer; the drop-in holds the slot's `OnCalendar`. `Persistent=false`: no burst of missed dispatches after downtime |
+| `/home/wl_admin/.config/fleet-dispatch/.env` | `FLEET_DISPATCH_TOKEN=...`, mode 0600, owner `wl_admin` (SECURITY_POLICY rule 1) |
+
+Exit codes of `fleet-dispatch` (in the journal as the unit's status): 0 dispatched, 2
+not on the allowlist or bad usage, 3 token missing or malformed, 4 GitHub refused it
+(4xx: token expired or revoked, missing permission), 5 network/5xx on all 3 attempts.
+
+### The PAT
+
+One fine-grained PAT serves both boxes. On GitHub: **Settings → Developer settings →
+Fine-grained tokens → Generate new token**:
+
+- Resource owner **Echo8Lore**; Repository access **Only select repositories →
+  action-servers**.
+- Repository permissions: **Actions: Read and write** (Metadata: read is added
+  automatically). Nothing else.
+- Expiry: whatever the org allows. If the org requires approval for fine-grained
+  tokens, approve it under the org's **Settings → Personal access tokens → Pending
+  requests**.
+
+Store it in Bitwarden (canonical copy). It never goes into chat, a ticket, shell
+history or a GitHub secret. Accepted risk (operator decision on OPS-23): CI jobs on the
+box can read the `.env`, since the runner user is in the docker group. The blast radius
+is dispatch, re-run and cancel of action-servers workflows.
+
+### Install on a box
+
+Once per box, as `wl_admin` (NOPASSWD sudo), from an up-to-date checkout of this repo:
+
+```bash
+git clone https://github.com/Echo8Lore/action-servers.git ~/action-servers 2>/dev/null \
+  || git -C ~/action-servers pull --ff-only
+cd ~/action-servers
+bash ops/install-fleet-dispatch.sh --check --slot a     # a on ovh-staging, b on ovh-devops-001
+sudo bash ops/install-fleet-dispatch.sh --slot a        # prompts for the PAT (hidden input)
+```
+
+Paste the PAT from Bitwarden at the hidden prompt. The installer writes the `.env`
+(0600 `wl_admin`), installs the script and units, runs `systemd-analyze verify`,
+enables the timers and lists them. Starting a timer dispatches nothing; the first
+dispatch is the box's next slot. The installer is idempotent: re-running it re-installs
+the files and keeps the existing token.
+
+Installer exit codes: 0 ok; 2 refused (bad arguments, not root, no `wl_admin`, or
+`wl_admin`'s home is not `/home/wl_admin`) and nothing changed; 3 token empty or
+malformed, and nothing written; **4 `systemd-analyze verify` failed**. After exit 4
+the script, units and `.env` **are installed but the timers are NOT enabled** (a
+re-install over a working box may leave the old timers running on the new files).
+Read the verify error, then either fix the cause (usually a stale checkout: `git
+pull --ff-only`) and re-run the installer, or run `--uninstall` to go back to nothing.
+`systemctl list-timers --all 'fleet-dispatch@*'` shows which state you're in.
+
+Non-interactive (EDI/Hermes, when the PAT is in its Bitwarden Secrets Manager project
+and so in its environment): pipe it on stdin, never in argv:
+
+```bash
+printf '%s\n' "$FLEET_DISPATCH_TOKEN" \
+  | ssh <ci-box> 'cd ~/action-servers && sudo bash ops/install-fleet-dispatch.sh --slot a --token-stdin'
+```
+
+Then, once **both** boxes have been dispatching for at least 2.5 h (the check's
+window), turn on the liveness check. Setting it earlier makes the first checks report
+the missing slots:
+
+```bash
+gh variable set FLEET_DISPATCH_ENABLED -R Echo8Lore/action-servers --body true
+```
+
+### Verify
+
+```bash
+systemctl list-timers --all 'fleet-dispatch@*'           # NEXT/LAST per timer
+systemctl list-units --all 'fleet-dispatch@*'             # timers active; a service shows 'failed' if its last run failed
+journalctl -u 'fleet-dispatch@*' --since -2h --no-pager   # one line per dispatch, with the exit status
+sudo systemctl start fleet-dispatch@runner-health.service # dispatch once now (optional)
+```
+
+Use the journal, not `systemctl status <service>`, for past runs: a oneshot that
+succeeded is unloaded between runs, so `status` often shows nothing useful.
+
+A good journal line: `fleet-dispatch: dispatched runner-health.yml on main (HTTP 204,
+attempt 1)`. On GitHub, the runs show as **workflow_dispatch** events:
+
+```bash
+gh run list -R Echo8Lore/action-servers --workflow runner-health.yml \
+  --event workflow_dispatch --limit 20 --json createdAt,status
+```
+
+### Rotate the PAT
+
+After a leak (rotation is reactive, SECURITY_POLICY rule 4) or when it expires: issue
+a new PAT as above, update Bitwarden, revoke the old one, then on **each** box:
+
+```bash
+cd ~/action-servers && sudo bash ops/install-fleet-dispatch.sh --slot <a|b> --rotate-token
+```
+
+Check with `journalctl -u 'fleet-dispatch@*' -n 5` after the next slot.
+
+### Uninstall
+
+```bash
+cd ~/action-servers && sudo bash ops/install-fleet-dispatch.sh --uninstall
+```
+
+This stops and disables the timers and removes the script, the units and the `.env`.
+If both boxes are uninstalled, set `FLEET_DISPATCH_ENABLED` to `false` (or delete it)
+first, or runner-health will report the scheduler as degraded. Revoke the PAT if it is
+no longer used anywhere.
+
+### What the scheduler alerts mean
+
+runner-health's `check-scheduler` job (on only when `FLEET_DISPATCH_ENABLED` is `true`)
+counts, for runner-health and queue-watchdog, the `workflow_dispatch` runs of the last
+150 min. It attributes each run to the slot whose scheduled time it is nearest to (up to
+4 min off), and calls a slot **silent** when fewer than half of its expected dispatches
+arrived. Manual dispatches away from the slot times are ignored. A GitHub API error
+only warns in the log and never alerts.
+
+One blind spot: a manual `gh workflow run` (or **Run workflow**) within 4 min of a
+slot time counts for that slot, since timer and manual runs come from the same token
+owner and can't be told apart. That can only hide a missing dispatch (a false
+negative), never raise a false alarm, and only for the one slot time it lands on.
+
+These findings go through runner-health's alert dedupe like every other condition: a
+finding pages when it appears, when the set of silent slots changes, and every 6 h
+while it lasts, not every run. The dispatch counts are not part of the fingerprint.
+
+- **WARNING - scheduler degraded: dispatch timers not firing for <workflow>**: every
+  slot is silent. That monitor is back on the throttled cron (~6/day). Because both
+  boxes stopped at once, suspect the shared PAT first (expired, revoked, or the org
+  withdrew its approval): the journal on either box shows `REJECTED ...: HTTP 401` or
+  `403`. Then check that the boxes are up.
+- **NOTICE - dispatch slot <a|b> (<host>) not firing for <workflow>**: that one box is
+  silent and the cadence is at half rate. If the same alert also lists that box's
+  runners offline or its disk check failing, the box is down. Otherwise check its timers.
+
+### Troubleshooting
+
+On the silent box:
+
+```bash
+systemctl list-timers --all 'fleet-dispatch@*'    # timers missing or NEXT empty -> re-run the installer
+journalctl -u 'fleet-dispatch@*' -n 20 --no-pager
+```
+
+| Journal says | Fix |
+|---|---|
+| `NOT CONFIGURED` / unit failed to load its EnvironmentFile | `.env` missing or empty: re-run the installer with `--rotate-token` |
+| `REJECTED ...: HTTP 401` | PAT expired or revoked: **Rotate the PAT** |
+| `REJECTED ...: HTTP 403` or `404` | PAT lacks Actions read/write on action-servers, or the org hasn't approved it |
+| `REJECTED ...: HTTP 422` | the workflow lost its `workflow_dispatch` trigger, or `main` is gone |
+| `FAILED ...: curl exit N` / `HTTP 5xx` | network or GitHub outage. It retries on the next slot; nothing to do unless it persists |
+| nothing at all | timer not enabled: `sudo systemctl enable --now fleet-dispatch@<name>.timer`, or re-run the installer |
+
+### Re-measure the cadence
+
+Don't trust the timers either. Use the OPS-23 method, per workflow, over at least a day:
+
+```bash
+gh run list -R Echo8Lore/action-servers --workflow runner-health.yml --limit 100 \
+  --json createdAt,event \
+  | jq -r 'group_by(.event)[] | "\(.[0].event): \(length) runs, \(map(.createdAt) | min) .. \(map(.createdAt) | max)"'
+```
+
+Runs per day = count / span (in days) for each event. Expected with both boxes:
+runner-health ~48/day of `workflow_dispatch` plus ~6 `schedule`; queue-watchdog ~144/day
+(`--limit 100` then spans under a day, which is enough).
 
 ## Host key changed
 
@@ -171,5 +389,7 @@ the deploy; it never falls back to unverified.
   host) is polled for facts and disk but never carries runners (OPS-17); a runner unit
   found there shows up as `extra` drift in the fleet-inventory report.
 - **Cost note:** all CI on self-hosted runners ≈ the VPS bill only; GitHub-hosted
-  minutes are spent solely by the monitor/restart/inventory/watchdog jobs (`ubuntu-latest`), which are
-  cheap and infrequent.
+  minutes are spent solely by the monitor/restart/inventory/watchdog jobs
+  (`ubuntu-latest`). With both dispatch timers up that is ~48 runner-health and ~144
+  queue-watchdog runs a day, all short; hosted minutes are free because this repo is
+  public.
