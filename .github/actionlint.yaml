@@ -11,3 +11,7 @@ paths:
   .github/workflows/deploy.yml:
     ignore:
       - 'property "workflow_sha" is not defined in object type'
+  # Same for runner-restart.yml's fleet/ checkout (OPS-33).
+  .github/workflows/runner-restart.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined in object type'

@@ -28,6 +28,7 @@ GitHub repo/org secrets or a local, gitignored config file.
 | `ops/notify-telegram.sh` | Sends one plain-text alert via the Telegram Bot API (`sendMessage` only; token never logged). Used by the health monitor, restart and queue-watchdog workflows, and by the reusable deploy workflow for deploy notifications |
 | `.github/workflows/fleet-inventory.yml` | Daily read-only poll of every inventory host (OS, uptime, disk, memory, runner units, nginx/docker presence); maps `domains[]` to hosts by DNS and reports runner drift vs the inventory. No IPs in the public report |
 | `fleet/collect-facts.sh`, `fleet/collect-host.sh`, `fleet/fleet_facts.py` | The collector it runs over SSH, the per-host driver, and the parser/report builder |
+| `fleet/known_hosts`, `fleet/pinned-ssh.sh` | Pinned SSH host keys (keyed by inventory host id, no addresses) and the ssh options every fleet workflow uses to verify them |
 | `docs/ONBOARDING.md` | How to add a project (runner + deploy + secrets) |
 | `docs/RUNBOOK.md` | Operate the fleet: restart, scale, disk, token rotation |
 

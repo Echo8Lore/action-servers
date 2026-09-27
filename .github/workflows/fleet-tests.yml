@@ -2,7 +2,9 @@ name: Fleet Tests
 
 # Unit tests for the fleet tooling. fleet/: the inventory report never carries
 # IPs/ports/images/server_names, drift classification, degraded input never breaking
-# the report. ops/: the queue watchdog's classification, dedupe and public-log hygiene.
+# the report, the pinned-host-key SSH options and fleet/known_hosts itself (one pin per
+# inventory host, keyed by id, no addresses). ops/: the queue watchdog's classification,
+# dedupe and public-log hygiene.
 # Stdlib only; no secrets, no network.
 # Hosted runner: this repo is public, so hosted minutes are free.
 

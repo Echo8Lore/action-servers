@@ -1,0 +1,18 @@
+# Pinned SSH host keys for the fleet hosts in fleet/inventory.yml (OPS-33).
+#
+# Keyed by inventory host id, NOT by address: every fleet ssh call passes
+# -o HostKeyAlias=<id> -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<this file>
+# (fleet/pinned-ssh.sh). Host keys are public data; the addresses stay in secrets.
+# Never add `ssh-keyscan -H` lines here: a hashed IPv4 entry is brute-forceable back
+# to the address, which this public repo promises not to carry.
+#
+# One ED25519 key per host. A key that does not match fails the SSH call loudly.
+# Re-pin (reinstalled VPS, rotated host key): docs/RUNBOOK.md "Host key changed".
+#
+# SHA256 fingerprints, for eyeballing against `ssh-keygen -lf` on the host:
+#   ovh-staging     SHA256:nEHWQurrW4s3cqbmkaHeoWy1Qmjgky5HTxA7jWyIYT4
+#   ovh-devops-001  SHA256:TvZ3navXHLwyRRUPdjft/4JrW0haxQIoyP69UqXbdfg
+#   hosting-vps     SHA256:xOHS/msE2NTLnTd1hMmmaJHjixMRWUPI/wbcr9WPkjw
+ovh-staging ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCudSiOiYSZ8iHzEm+r5pwFYXNktWqGFW3aXJMbn/pY
+ovh-devops-001 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBcGV2xCf9Ahatfo3XdK1v5DHs9HFDpJT/rwE1QTeONs
+hosting-vps ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGHYuHL8re7Zcndx1N8YJHLCFTxd5gT9V6Ype6jbN7Q4
