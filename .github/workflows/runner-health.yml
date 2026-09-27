@@ -141,8 +141,12 @@ jobs:
 
   # ── Host disk check (every inventory host) ───────────────────────────────
   # A failing leg (disk over threshold, SSH unreachable, or a host key that does not
-  # match fleet/known_hosts) fails this job; the alert job reads
-  # needs.check-disk.result.
+  # match fleet/known_hosts) fails this job. The alert job lists the failed legs and
+  # each one's first failed STEP from the jobs API (OPS-45) to page per host: the Probe
+  # step never fails on those conditions, it only classifies them, and exactly one of
+  # the three steps after it fails. Their names are the cause, so keep them in sync
+  # with DISK_STEPS in ops/alert_dedupe.py. (Matrix legs cannot pass per-leg job
+  # outputs, and the jobs API needs no artifact upload/download.)
   #
   # Plain ssh with the pinned host key (fleet/pinned-ssh.sh, OPS-33) rather than
   # appleboy/ssh-action: that action's `fingerprint` input takes one SHA256 per host
@@ -163,36 +167,56 @@ jobs:
         with:
           sparse-checkout: fleet
 
-      - name: Check ${{ matrix.host.id }} disk
+      - name: Probe ${{ matrix.host.id }} disk
+        id: probe
         env:
           HOST_ID: ${{ matrix.host.id }}
-          THRESHOLD: ${{ matrix.host.disk_threshold || 85 }}
           SSH_HOST: ${{ secrets[format('{0}_VPS_HOST', matrix.host.ssh_secret_prefix)] }}
           SSH_USER: ${{ secrets[format('{0}_VPS_USERNAME', matrix.host.ssh_secret_prefix)] }}
           SSH_KEY: ${{ secrets[format('{0}_VPS_SSH_KEY', matrix.host.ssh_secret_prefix)] }}
         run: |
           set -euo pipefail
+          verdict() { echo "status=$1" >> "$GITHUB_OUTPUT"; exit 0; }
           if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_KEY" ]; then
-            echo "::error::${HOST_ID}: SSH secrets not configured"; exit 1
+            echo "::error::${HOST_ID}: SSH secrets not configured"; verdict ssh
           fi
           source fleet/pinned-ssh.sh
           printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/key"
           chmod 600 "$RUNNER_TEMP/key"
-          pinned_ssh_opts "$HOST_ID" "$RUNNER_TEMP/key"
+          pinned_ssh_opts "$HOST_ID" "$RUNNER_TEMP/key" || verdict hostkey
           rc=0
           USAGE=$(ssh "${PINNED_SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
                     "df / | awk 'NR==2 {print \$5}' | tr -d '%'" 2> "$RUNNER_TEMP/ssh.err") || rc=$?
           krc=0
           pinned_ssh_check "$HOST_ID" "$rc" "$RUNNER_TEMP/ssh.err" || krc=$?
-          [ "$krc" -eq 2 ] && exit 1
+          [ "$krc" -eq 2 ] && verdict hostkey
           if [ "$rc" -ne 0 ]; then
-            echo "::error::${HOST_ID}: SSH failed (exit ${rc})"; exit 1
+            echo "::error::${HOST_ID}: SSH failed (exit ${rc})"; verdict ssh
           fi
           case "$USAGE" in
-            ''|*[!0-9]*) echo "::error::${HOST_ID}: could not read disk usage"; exit 1 ;;
+            ''|*[!0-9]*) echo "::error::${HOST_ID}: could not read disk usage"; verdict ssh ;;
           esac
+          { echo "usage=${USAGE}"; echo "status=ok"; } >> "$GITHUB_OUTPUT"
+
+      # The Probe step printed the ::error:: for each of these two.
+      - name: Host key matches fleet/known_hosts
+        if: steps.probe.outputs.status == 'hostkey'
+        run: exit 1
+
+      - name: SSH reachable
+        if: steps.probe.outputs.status != 'ok'
+        run: exit 1
+
+      - name: Disk under threshold
+        env:
+          HOST_ID: ${{ matrix.host.id }}
+          USAGE: ${{ steps.probe.outputs.usage }}
+          THRESHOLD: ${{ matrix.host.disk_threshold || 85 }}
+        run: |
           echo "Host disk: ${USAGE}% (threshold ${THRESHOLD}%)"
-          if [ "$USAGE" -ge "$THRESHOLD" ]; then echo "THRESHOLD_EXCEEDED"; exit 1; fi
+          if [ "$USAGE" -ge "$THRESHOLD" ]; then
+            echo "::error::${HOST_ID}: disk ${USAGE}% is at or over the ${THRESHOLD}% threshold"; exit 1
+          fi
 
   # ── Stale in-progress jobs (>60 min) across known repos ──────────────────
   check-stale-jobs:
@@ -288,7 +312,8 @@ jobs:
   #
   # Dedupe (ops/alert_dedupe.py): at the dispatch cadence (every 30 min) an ongoing
   # incident would otherwise page ~48x a day. The page is fingerprinted by its condition
-  # KEYS (offline runner names, disk, stale runs, scheduler findings), not its prose.
+  # KEYS (offline runner names, disk:<host> per failed check-disk leg, stale runs,
+  # scheduler findings), not its prose.
   # It is sent when the fingerprint changes or is 6 h old, plus one "RESOLVED" when
   # everything clears; test_alert bypasses it. State ({fingerprint, paged_at}) lives in
   # the Actions cache like queue-watchdog's: saved under a new key each run, restored by
@@ -296,6 +321,12 @@ jobs:
   # failed send pages again next run. If the cache is evicted, an ongoing incident pages
   # once more: that errs toward paging. If the helper itself fails, the message is sent
   # undeduplicated.
+  #
+  # Per-host disk keys (OPS-45): needs.check-disk.result is one value for the whole
+  # matrix, so the step lists the failed legs, and each one's failing step (= cause),
+  # from this run's jobs API with GITHUB_TOKEN; the workflow's `actions: write` above
+  # includes the `actions: read` that needs. If that call fails, the alert degrades to
+  # the single "disk" key and the generic line (never silent).
   alert:
     needs: [check-runners, check-disk, check-stale-jobs, check-scheduler]
     if: always()
@@ -318,6 +349,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ github.token }}
           TEST_ALERT: ${{ github.event_name == 'workflow_dispatch' && inputs.test_alert }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ANY_OFFLINE: ${{ needs.check-runners.outputs.any_offline }}
@@ -331,15 +363,31 @@ jobs:
           # check job must not produce a RESOLVED.
           INCOMPLETE: ${{ needs.check-runners.result != 'success' || needs.check-stale-jobs.result != 'success' || needs.check-scheduler.result == 'failure' || needs.check-scheduler.result == 'cancelled' || (needs.check-disk.result != 'success' && needs.check-disk.result != 'failure') }}
         run: |
-          # Plain text. The facts are runner names, counts and workflow run names --
-          # no host addresses -- so the text is safe to echo into this public log.
+          # Plain text. The facts are runner names, inventory host ids, counts and
+          # workflow run names -- no host addresses -- so the text is safe to echo into
+          # this public log.
           MESSAGE=""
+
+          # Failed check-disk legs -> one JSON line each: {name, step (first failed)}.
+          # No file on an API failure: alert_dedupe.py then falls back to one "disk" key.
+          DISK_LEGS="$RUNNER_TEMP/disk-legs.jsonl"
+          if [ "$DISK_WARNING" = "true" ]; then
+            if ! gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+                   --jq '.jobs[] | select(.name | startswith("check-disk (")) | select(.conclusion == "failure")
+                         | {name, step: ([.steps[]? | select(.conclusion == "failure") | .name][0] // "")} | tojson' \
+                   > "$DISK_LEGS"; then
+              echo "::warning::could not list the failed check-disk legs; alerting on one fleet-wide disk condition."
+              rm -f "$DISK_LEGS"
+            fi
+          fi
           if [ "$ANY_OFFLINE" = "true" ]; then
             LIST=$(echo "$OFFLINE_RUNNERS" | jq -r 'join(", ")' 2>/dev/null || echo "$OFFLINE_RUNNERS")
             MESSAGE="${MESSAGE}CRITICAL - Runner(s) OFFLINE: ${LIST}\nAuto-restart firing.\n\n"
           fi
           if [ "$DISK_WARNING" = "true" ]; then
-            MESSAGE="${MESSAGE}WARNING - Disk over threshold (or SSH unreachable, or host key mismatch) on a fleet host - see the check-disk legs of this run\n\n"
+            DISK_TEXT=$(python3 ops/alert_dedupe.py disk-message --disk true --legs "$DISK_LEGS") \
+              || DISK_TEXT="WARNING - Disk over threshold (or SSH unreachable, or host key mismatch) on a fleet host - see the check-disk legs of this run"
+            MESSAGE="${MESSAGE}${DISK_TEXT}\n\n"
           fi
           if [ -n "$STALE_COUNT" ] && [ "$STALE_COUNT" != "0" ]; then
             MESSAGE="${MESSAGE}WARNING - ${STALE_COUNT} stale run(s) (>60min):\n${STALE_SUMMARY}\n\n"
@@ -374,7 +422,7 @@ jobs:
             --message "$RUNNER_TEMP/alert.txt" --out "$RUNNER_TEMP/send.txt" \
             --run-url "$RUN_URL" \
             --any-offline "$ANY_OFFLINE" --offline-runners="$OFFLINE_RUNNERS" \
-            --disk "$DISK_WARNING" \
+            --disk "$DISK_WARNING" --disk-legs "$DISK_LEGS" \
             --stale-count "$STALE_COUNT" --stale-summary="$STALE_SUMMARY" \
             --scheduler-keys="$SCHEDULER_KEYS" \
             --incomplete "$INCOMPLETE" --test-alert "$TEST_ALERT" || drc=$?
