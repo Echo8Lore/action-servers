@@ -186,11 +186,13 @@ jobs:
 
           ssh "${DEPLOY_SSH_OPTS[@]}" "$T" "mkdir -p ${TEMP}"
           # Sync working tree (exclude heavy/local artifacts and the live DB).
-          EXCLUDES="--exclude node_modules --exclude .git --exclude '*.db' --exclude _qa --exclude test-results --exclude playwright-report --exclude .action-servers"
+          # An array, not a string: an unquoted string expansion would pass '*.db' to
+          # rsync with the quotes intact, so *.db would not be excluded (OPS-39).
+          EXCLUDES=(--exclude node_modules --exclude .git --exclude '*.db' --exclude _qa --exclude test-results --exclude playwright-report --exclude .action-servers)
           # Same pinned options for rsync's ssh; rsync splits -e on spaces but honours
           # single quotes (a runner path may contain spaces).
           RSH="ssh$(printf " '%s'" "${DEPLOY_SSH_OPTS[@]}")"
-          rsync -avz --delete -e "$RSH" $EXCLUDES ./ "${T}:${TEMP}/"
+          rsync -avz --delete -e "$RSH" "${EXCLUDES[@]}" ./ "${T}:${TEMP}/"
 
           # Build the remote deploy script. DB file (if any) is preserved in place.
           DB_EXCLUDE=""
