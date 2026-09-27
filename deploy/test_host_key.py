@@ -249,9 +249,11 @@ class DeploySh(unittest.TestCase):
         seen = 0
         for ln in DEPLOY_SH.read_text().splitlines():
             code = ln.strip()
-            if code.startswith("#") or code.startswith("for cmd in") or code.startswith("echo"):
-                continue  # comments, the `command -v` loop, printed hints
-            for m in re.finditer(r"(?:^|[\s(|;{])ssh ", code):
+            if code.startswith("#") or code.startswith("for cmd in"):
+                continue  # comments, the `command -v` loop
+            if code.startswith("echo") and "$(" not in code and "`" not in code:
+                continue  # printed hints; an echo "$(ssh ...)" still runs ssh, so it's checked
+            for m in re.finditer(r"(?:^|[\s(|;{`])ssh ", code):
                 seen += 1
                 self.assertRegex(code[m.end():], r'^(-n )?"\$\{SSH_OPTS\[@\]\}"', code)
         self.assertGreaterEqual(seen, 6)

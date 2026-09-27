@@ -2,8 +2,9 @@ name: Fleet Tests
 
 # Unit tests for the fleet tooling. fleet/: the inventory report never carries
 # IPs/ports/images/server_names, drift classification, degraded input never breaking
-# the report, the pinned-host-key SSH options and fleet/known_hosts itself (one pin per
-# inventory host, keyed by id, no addresses). ops/: the queue watchdog's classification,
+# the report, the pinned-host-key SSH options (against a real loopback sshd too, with a
+# space in the path), every fleet workflow's ssh using them, and fleet/known_hosts
+# itself (one pin per inventory host, keyed by id, no addresses). ops/: the queue watchdog's classification,
 # dedupe and public-log hygiene; fleet-dispatch.sh (token off argv, allowlist, retry
 # policy, exit codes; curl stubbed), its systemd units and installer --check, and the
 # dispatch-timer liveness check; runner-health's alert dedupe and its wiring. deploy/: host-key pinning for the deploy path (pin

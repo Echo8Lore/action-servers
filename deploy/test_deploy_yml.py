@@ -30,15 +30,18 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 DEPLOY_YML = ROOT / ".github" / "workflows" / "deploy.yml"
 
-# A dotted quad not glued to a word or another dot-number: skips v1.2.3.4 and
-# 1.2.3.4.5, still matches an address that ends a sentence ("... 192.0.2.1.").
-IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
+# A dotted quad not glued to a letter, digit or another dot-number: skips v1.2.3.4 and
+# 1.2.3.4.5, still matches an address that ends a sentence ("... 192.0.2.1.") or sits
+# between underscores ("backup_192.0.2.1.tar": "_" is a separator here, not a word
+# character, hence [^\W_] rather than \w).
+IPV4 = re.compile(r"(?<![^\W_]|\.)(?:\d{1,3}\.){3}\d{1,3}(?![^\W_]|\.\d)")
 # Hex groups and colons: starts with a hex group, has at least two colons, not glued
-# to a word, colon or dot (so host:port, times and 0.0.0.0:22 don't start a match).
-# Leading-"::" forms (::1, ::add-mask::, a[::2]) are never public, so they're skipped.
-# ipaddress decides whether it really is an address; anything it rejects (a time, a
+# to a word or dot (so 0.0.0.0:22 doesn't start a match). A colon before it is fine:
+# "host:2001:db8::1" is scanned from the address on. Leading-"::" forms (::1,
+# ::add-mask::, a[::2]) are never public, so they're skipped. ipaddress decides
+# whether it really is an address; anything it rejects (a time, host:port, a
 # fingerprint) is ignored.
-IPV6 = re.compile(r"(?<![\w:.])(?=[0-9A-Fa-f]{1,4}:[0-9A-Fa-f]*:)[0-9A-Fa-f:]+(?![\w:]|\.\w)")
+IPV6 = re.compile(r"(?<![\w.])(?=[0-9A-Fa-f]{1,4}:[0-9A-Fa-f]*:)[0-9A-Fa-f:]+(?![\w:]|\.\w)")
 
 
 def public_addresses(line):
@@ -115,24 +118,31 @@ class Matcher(unittest.TestCase):
     # below doesn't flag this file. They are well-known public resolvers, not fleet hosts.
     GLOBAL4 = "8.8." + "4.4"
     GLOBAL6 = "2606:4700:" + ":1111"
+    GLOBAL6_FULL = "2606:4700:" + "1:2:3:4:5:6"   # no "::", so no suffix of it parses
 
     def test_documentation_and_private_ranges_pass(self):
         for line in ('"ip": "203.0.113.10"', "ssh 192.0.2.50", "198.51.100.7:8443",
                      "10.1.2.3/8", "127.0.0.1", "0.0.0.0:22", "inet6 2001:db8::5/64",
-                     "fe80::1", "::1", "::"):
+                     "fe80::1", "::1", "::", "host:2001:db8::5", "backup_192.0.2.1.tar"):
             self.assertEqual(public_addresses(line), [], line)
 
     def test_global_addresses_are_flagged(self):
         for line in (f'"ip": "{self.GLOBAL4}"', f"ends a sentence {self.GLOBAL4}.",
                      f"{self.GLOBAL4}:22", f"inet6 {self.GLOBAL6}/64",
                      f"[{self.GLOBAL6}]:443", f"to {self.GLOBAL6}.",
-                     f"https://{self.GLOBAL4}.nip.io/"):
+                     f"https://{self.GLOBAL4}.nip.io/",
+                     f"host:{self.GLOBAL6}", f"addr=host:{self.GLOBAL6}/64",
+                     f"ssh://u@{self.GLOBAL6}", f"::ffff:{self.GLOBAL4}",
+                     f"backup_{self.GLOBAL4}.tar", f"snap_{self.GLOBAL4}_2026",
+                     f"KEY={self.GLOBAL4}"):
             self.assertEqual(len(public_addresses(line)), 1, line)
 
     def test_non_addresses_are_ignored(self):
         for line in ("uses: tool@v1.2.3.4", "version 8.8.4.4.1",
                      "Date: 19:39:29", "MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
-                     "a[::2]", "echo ::add-mask::x", "std::vector", "SHA256:nEHWQurrW4s3cqbmkaHeoWy1"):
+                     "a[::2]", "echo ::add-mask::x", "std::vector", "SHA256:nEHWQurrW4s3cqbmkaHeoWy1",
+                     "at 2026-09-27T12:34:56Z", "host:22:33", "id:beef:cafe", f"x{self.GLOBAL4}",
+                     "abc:dead:beef::1x", f"v{self.GLOBAL4}_linux", f"x{self.GLOBAL6_FULL}"):
             self.assertEqual(public_addresses(line), [], line)
 
 
