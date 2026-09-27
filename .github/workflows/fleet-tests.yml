@@ -4,7 +4,8 @@ name: Fleet Tests
 # IPs/ports/images/server_names, drift classification, degraded input never breaking
 # the report, the pinned-host-key SSH options and fleet/known_hosts itself (one pin per
 # inventory host, keyed by id, no addresses). ops/: the queue watchdog's classification,
-# dedupe and public-log hygiene.
+# dedupe and public-log hygiene. deploy/: host-key pinning for the deploy path (pin
+# parsing, ssh options, the preflight, every deploy ssh/rsync using them).
 # Stdlib only; no secrets, no network.
 # Hosted runner: this repo is public, so hosted minutes are free.
 
@@ -14,11 +15,17 @@ on:
     paths:
       - 'fleet/**'
       - 'ops/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/runner-restart.yml'
       - '.github/workflows/fleet-tests.yml'
   pull_request:
     paths:
       - 'fleet/**'
       - 'ops/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/runner-restart.yml'
       - '.github/workflows/fleet-tests.yml'
   workflow_dispatch:
 
@@ -35,3 +42,5 @@ jobs:
         run: python3 -m unittest discover -s fleet -v
       - name: Run ops tests
         run: python3 -m unittest discover -s ops -v
+      - name: Run deploy tests
+        run: python3 -m unittest discover -s deploy -v

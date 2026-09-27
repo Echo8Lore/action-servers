@@ -15,7 +15,15 @@
 # names, health endpoint, optional reverse proxy, DB backup, smoke hook) lives there,
 # so this script is not tied to any one app. Generalized from Weapons_Lore
 # scripts/deploy.sh.
+#
+# Host key (OPS-38): set target.host_key in the config, or VPS_HOST_KEY in the
+# environment (wins), to the VPS's known_hosts line(s) (`<type> <base64>`). ssh then
+# verifies it with StrictHostKeyChecking=yes (deploy/host-key.sh, shared with the
+# reusable workflow), and a connect-only check fails loudly before anything runs on the
+# host. Unset: the old accept-new against ~/.ssh/known_hosts, with a warning.
 # ============================================================================
+# Remote command lines and the heredoc are expanded client-side on purpose.
+# shellcheck disable=SC2029,SC2087
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,6 +50,9 @@ for cmd in ssh tar node; do
   command -v "$cmd" &>/dev/null || { error "Required command not found: $cmd"; exit 1; }
 done
 [ -f "$CONFIG_FILE" ] || { error "Config not found: $CONFIG_FILE (cp config.example.json config.json)"; exit 1; }
+[ -f "$SCRIPT_DIR/host-key.sh" ] || { error "Missing $SCRIPT_DIR/host-key.sh (copy it along with deploy.sh)"; exit 1; }
+# shellcheck source=deploy/host-key.sh
+source "$SCRIPT_DIR/host-key.sh"
 
 # ── Config accessor (no jq dependency) ──────────────────────────────────────
 cfg() {
@@ -68,19 +79,30 @@ HEALTH_PATH=$(cfg app.health.path); HEALTH_PATH=${HEALTH_PATH:-/api/health}
 HEALTH_EXPECT=$(cfg app.health.expect); HEALTH_EXPECT=${HEALTH_EXPECT:-'"status":"ok"'}
 DB_REMOTE=$(cfg app.db.remote_file)
 SMOKE_HOOK=$(cfg app.hooks.smoke)
+VPS_HOST_KEY="${VPS_HOST_KEY:-$(cfg target.host_key)}"
 
 # Resolve relative SSH key against the config's directory.
 if [ -n "$SSH_KEY" ] && [[ "$SSH_KEY" != /* ]]; then
   CFG_DIR="$(cd "$(dirname "$CONFIG_FILE")" && pwd)"
   SSH_KEY="$(cd "$CFG_DIR" && cd "$(dirname "$SSH_KEY")" && pwd)/$(basename "$SSH_KEY")"
 fi
-SSH_OPTS="-o StrictHostKeyChecking=accept-new -p $VPS_PORT"
-[ -n "$SSH_KEY" ] && [ -f "$SSH_KEY" ] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
 SSH_TARGET="$SSH_USER@$VPS_HOST"
 
 [ -n "$VPS_HOST" ]    || { error "target.ip missing in config"; exit 1; }
 [ -n "$REMOTE_PATH" ] || { error "app.remote_path missing in config"; exit 1; }
 [ -n "$CONTAINERS" ]  || { error "app.containers missing in config"; exit 1; }
+
+# Host key: a pin goes to a private per-run known_hosts file; no pin keeps the old
+# accept-new against ~/.ssh/known_hosts (host-key.sh warns).
+KNOWN_HOSTS_FILE=""
+if [ -n "${VPS_HOST_KEY//[[:space:]]/}" ]; then
+  KNOWN_HOSTS_FILE=$(mktemp)
+  trap 'rm -f "$KNOWN_HOSTS_FILE"' EXIT
+fi
+deploy_host_key_setup "$KNOWN_HOSTS_FILE" || exit 1
+deploy_ssh_opts "$KNOWN_HOSTS_FILE" "$DEPLOY_HOST_PINNED"
+SSH_OPTS=("${DEPLOY_SSH_OPTS[@]}" -p "$VPS_PORT")
+[ -n "$SSH_KEY" ] && [ -f "$SSH_KEY" ] && SSH_OPTS+=(-i "$SSH_KEY")
 
 info "Target: $SSH_TARGET:$REMOTE_PATH (${VPS_DOMAIN:-no domain})"
 info "Containers: $CONTAINERS ${PROXY_CONTAINER:+(+proxy $PROXY_CONTAINER)}"
@@ -109,11 +131,22 @@ if [ "$DRY_RUN" = true ]; then
   exit 0
 fi
 
+# ── Host key / SSH preflight: nothing runs on the host before this passes ─────
+SSH_ERR=$(mktemp)
+rc=0; ssh -n "${SSH_OPTS[@]}" "$SSH_TARGET" true 2> "$SSH_ERR" || rc=$?
+krc=0; deploy_ssh_check "$rc" "$SSH_ERR" || krc=$?
+if [ "$rc" -ne 0 ]; then
+  [ "$krc" -eq 2 ] || { fail "SSH to $SSH_TARGET failed (exit $rc):"; cat "$SSH_ERR" >&2; }
+  rm -f "$SSH_ERR"; exit 1
+fi
+rm -f "$SSH_ERR"
+pass "SSH preflight ($([ "$DEPLOY_HOST_PINNED" = true ] && echo "host key pinned" || echo "host key NOT verified"))"
+
 # ── Transfer (tar over ssh — Windows/rsync friendly) ────────────────────────
 TEMP_DIR="/home/$SSH_USER/app_temp"
 info "Transferring to $SSH_TARGET:$TEMP_DIR ..."
-ssh $SSH_OPTS "$SSH_TARGET" "rm -rf $TEMP_DIR && mkdir -p $TEMP_DIR"
-(cd "$PROJECT_DIR" && tar czf - "${TAR_EXCLUDES[@]}" .) | ssh $SSH_OPTS "$SSH_TARGET" "tar xzf - -C $TEMP_DIR"
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -rf $TEMP_DIR && mkdir -p $TEMP_DIR"
+(cd "$PROJECT_DIR" && tar czf - "${TAR_EXCLUDES[@]}" .) | ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "tar xzf - -C $TEMP_DIR"
 pass "Files synced"
 
 # ── Remote deploy ───────────────────────────────────────────────────────────
@@ -121,7 +154,7 @@ DB_EXCLUDE=""
 [ -n "$DB_REMOTE" ] && DB_EXCLUDE="--exclude '$DB_REMOTE'"
 
 info "Deploying on VPS..."
-ssh $SSH_OPTS "$SSH_TARGET" bash -s <<DEPLOY
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s <<DEPLOY
 set -e
 sudo rsync -av $DB_EXCLUDE $TEMP_DIR/ $REMOTE_PATH/
 sudo chown -R $SSH_USER:$SSH_USER $REMOTE_PATH
@@ -140,14 +173,14 @@ PRIMARY=$(echo "$CONTAINERS" | awk '{print $1}')
 # Gate 1: containers running
 ALL_UP=true
 for c in $CONTAINERS ${PROXY_CONTAINER:-}; do
-  RUNNING=$(ssh $SSH_OPTS "$SSH_TARGET" "sudo docker ps -q -f name=$c -f status=running")
+  RUNNING=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "sudo docker ps -q -f name=$c -f status=running")
   [ -z "$RUNNING" ] && { ALL_UP=false; fail "Container not running: $c"; }
 done
 if [ "$ALL_UP" = true ]; then pass "Gate 1/3: containers running"; GATES_PASSED=$((GATES_PASSED+1)); fi
 
 # Gate 2: optional smoke hook (inside primary container)
 if [ -n "$SMOKE_HOOK" ]; then
-  SMOKE=$(ssh $SSH_OPTS "$SSH_TARGET" "sudo docker exec $PRIMARY sh -c \"$SMOKE_HOOK\"" 2>&1) || true
+  SMOKE=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "sudo docker exec $PRIMARY sh -c \"$SMOKE_HOOK\"" 2>&1) || true
   if echo "$SMOKE" | grep -q 'OK'; then pass "Gate 2/3: smoke hook passed"; GATES_PASSED=$((GATES_PASSED+1));
   else fail "Gate 2/3: smoke hook failed: $SMOKE"; fi
 else
@@ -171,7 +204,14 @@ if [ "$GATES_PASSED" -eq "$GATES_TOTAL" ]; then
   echo "  DEPLOY SUCCESSFUL — $GATES_PASSED/$GATES_TOTAL gates"
 else
   echo "  DEPLOY COMPLETED WITH ISSUES — $GATES_PASSED/$GATES_TOTAL gates"
-  echo "  Debug: ssh $SSH_TARGET 'sudo docker ps -a && sudo docker logs $PRIMARY'"
+  # Not a bare `ssh $SSH_TARGET`: that would skip the pin. The per-run pin file is gone
+  # after exit, so a pinned hint names what to put in one.
+  if [ "$DEPLOY_HOST_PINNED" = true ]; then
+    echo "  Debug (pinned; <kh> = a file with the line 'deploy-target <your host_key>'):"
+    echo "    ssh -p $VPS_PORT -o HostKeyAlias=deploy-target -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<kh> $SSH_TARGET 'sudo docker ps -a && sudo docker logs $PRIMARY'"
+  else
+    echo "  Debug: ssh ${SSH_OPTS[*]} $SSH_TARGET 'sudo docker ps -a && sudo docker logs $PRIMARY'"
+  fi
 fi
 echo "  Rollback is code-only (re-deploy a previous ref). DB migrations are forward-only."
 echo "=========================================="

@@ -16,6 +16,8 @@ Day-2 operations for the runner fleet and deploys. Most of this is automated by
 | Queue-watchdog alert: "online but busy" (pages at 2 h) | Backlog, not a missing runner: wait, cancel superseded runs, or add runner capacity for those labels |
 | Prove the queue watchdog pages (fire drill) | Dispatch **Queue Watchdog Self-Test**, then **Queue Watchdog** with `threshold_minutes: 1`; expect a "NO registered runner" Telegram page; then `gh run cancel` the self-test run promptly (a forgotten one pages again at 30 min and 6 h) |
 | `HOST KEY VERIFICATION FAILED` in a fleet job | The host presented a key that isn't the one pinned in `fleet/known_hosts`. Don't re-pin blindly: see **Host key changed** below |
+| `HOST KEY VERIFICATION FAILED` in a deploy | The project's VPS presented a key other than its `VPS_HOST_KEY`. Nothing ran on the host. Verify as in **Host key changed** steps 1-2, then update the project's pin: **Deploy host key** |
+| `Deploy host key NOT verified` warning | The caller passes no `VPS_HOST_KEY`: pin it (**Deploy host key**) |
 | Unsure which host serves a domain, or what runs where | Run **Fleet Inventory** (daily; dispatchable) and read its step summary. Poll, don't trust notes |
 
 ## Runners
@@ -74,7 +76,8 @@ Then confirm the runner that was holding it is online (restart if not).
 - **`<PREFIX>_VPS_*`** secrets are the SSH path the monitor/restart/inventory use to
   reach each host: `DEVOPS` (ovh-staging), `DEVOPS001` (ovh-devops-001), `HOSTING`
   (hosting-vps). Rotate the key on the host and update that prefix's `_VPS_SSH_KEY`.
-- Per-project deploy secrets (`VPS_*`, `DEPLOY_ENV_JSON`) live on each project repo.
+- Per-project deploy secrets (`VPS_*`, `DEPLOY_ENV_JSON`) live on each project repo,
+  including the optional `VPS_HOST_KEY` pin (**Deploy host key**).
 - **Host keys** are not secrets: each fleet host's ED25519 key is committed in
   `fleet/known_hosts` under its inventory id, and every fleet SSH call (inventory,
   disk check, restart) verifies it with `StrictHostKeyChecking=yes` (OPS-33).
@@ -108,11 +111,46 @@ man-in-the-middle. Treat it as the second until you've shown it's the first:
 
 Removing a host: delete its `hosts:` entry and its `fleet/known_hosts` line together.
 
+## Deploy host key
+
+Project VPSes aren't in the fleet inventory, so the reusable deploy workflow can't pin
+them in `fleet/known_hosts`: the caller passes the pin, as the `VPS_HOST_KEY` secret or
+the `vps_host_key` input (OPS-38). `deploy/host-key.sh` rewrites it under a fixed alias
+(`HostKeyAlias=deploy-target`), so it matches whatever address `VPS_HOST` holds, and
+every ssh/rsync in the deploy job uses `StrictHostKeyChecking=yes` against it alone. A
+connect-only preflight runs first: a mismatch fails there, before authentication, so no
+remote command runs. Without a pin the job warns and trusts the first key it sees (the
+old behaviour). `deploy/deploy.sh` reads the same pin from `target.host_key` or
+`VPS_HOST_KEY`.
+
+To pin (or re-pin after a verified reinstall):
+
+1. Read the key on the host over a path you trust (console, or a session you already
+   trust): `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
+2. From a machine you control, fetch what the network presents and compare the SHA256
+   fingerprints; they must be identical:
+   ```bash
+   ssh-keyscan -t ed25519 <address> 2>/dev/null | cut -d' ' -f2- | tee /tmp/hk
+   ssh-keygen -lf /tmp/hk
+   ```
+3. Put the `ssh-ed25519 AAAA...` line (no address) in the project's `VPS_HOST_KEY`
+   secret: `gh secret set VPS_HOST_KEY -R <owner>/<repo> < /tmp/hk`. Or, since a host key
+   is public, pass that same line as the `vps_host_key` input in the caller. Never
+   commit a line that names the address, or an `ssh-keyscan -H` hash.
+4. Re-run the deploy: its **Verify VPS host key** step logs the pinned fingerprint and
+   `SSH to the deploy target OK (host key pinned)`.
+
+Several lines are allowed (e.g. an ed25519 and an rsa key, or the old and new key
+during a planned host-key rotation; drop the old one afterwards). A malformed pin fails
+the deploy; it never falls back to unverified.
+
 ## Deploys
 
 - Normal path: push to `main` → project's `deploy.yml` calls the reusable workflow.
 - Manual: `Actions → Deploy → Run workflow`.
 - Local fallback: `./deploy/deploy.sh` (config-driven; `--dry-run` to preview).
+- Host key: pinned by the caller's `VPS_HOST_KEY` (**Deploy host key**); a mismatch
+  fails the **Verify VPS host key** step before anything touches the host.
 - Notification: the reusable workflow's `notify` job sends one Telegram message (success
   or failure) when the caller passes `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`; without
   them it skips with a notice. It never fails the deploy.
