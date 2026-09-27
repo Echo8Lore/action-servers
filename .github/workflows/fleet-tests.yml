@@ -5,28 +5,18 @@ name: Fleet Tests
 # the report, the pinned-host-key SSH options and fleet/known_hosts itself (one pin per
 # inventory host, keyed by id, no addresses). ops/: the queue watchdog's classification,
 # dedupe and public-log hygiene. deploy/: host-key pinning for the deploy path (pin
-# parsing, ssh options, the preflight, every deploy ssh/rsync using them).
+# parsing, ssh options, the preflight, every deploy ssh/rsync using them), deploy.yml's
+# rsync excludes, and no public IP address in any tracked file.
 # Stdlib only; no secrets, no network.
 # Hosted runner: this repo is public, so hosted minutes are free.
 
 on:
+  # No paths filter: deploy/test_deploy_yml.py scans every tracked file for public IP
+  # addresses, so a change anywhere (docs, README, any workflow) must run it. The
+  # suites take a few seconds on a free hosted runner.
   push:
     branches: [main]
-    paths:
-      - 'fleet/**'
-      - 'ops/**'
-      - 'deploy/**'
-      - '.github/workflows/deploy.yml'
-      - '.github/workflows/runner-restart.yml'
-      - '.github/workflows/fleet-tests.yml'
   pull_request:
-    paths:
-      - 'fleet/**'
-      - 'ops/**'
-      - 'deploy/**'
-      - '.github/workflows/deploy.yml'
-      - '.github/workflows/runner-restart.yml'
-      - '.github/workflows/fleet-tests.yml'
   workflow_dispatch:
 
 permissions:

@@ -9,10 +9,12 @@ What they pin:
      '*.db' (quotes included), so *.db files were synced. When rsync is installed, the
      EXCLUDES line from deploy.yml is run against a local tree to prove *.db and
      node_modules/ are left out.
-  2. No public IPv4 address appears in any tracked file. This repo is public and real
-     addresses stay in secrets; examples and tests use RFC 5737 TEST-NET addresses
-     (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) or private/loopback ranges. The
-     check is by range, so the real addresses never have to be written down here.
+  2. No public IPv4 or IPv6 address appears in any tracked file. This repo is public
+     and real addresses stay in secrets; examples and tests use RFC 5737 TEST-NET
+     addresses (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24), RFC 3849 2001:db8::/32,
+     or private/loopback ranges. The check is by range (ipaddress .is_global), so the
+     real addresses never have to be written down here. Four-part version strings
+     (v1.2.3.4, 1.2.3.4.5) are not addresses and are skipped.
 Nothing here touches the network.
 """
 
@@ -28,7 +30,29 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 DEPLOY_YML = ROOT / ".github" / "workflows" / "deploy.yml"
 
-IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+# A dotted quad not glued to a word or another dot-number: skips v1.2.3.4 and
+# 1.2.3.4.5, still matches an address that ends a sentence ("... 192.0.2.1.").
+IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\w)")
+# Hex groups and colons: starts with a hex group, has at least two colons, not glued
+# to a word, colon or dot (so host:port, times and 0.0.0.0:22 don't start a match).
+# Leading-"::" forms (::1, ::add-mask::, a[::2]) are never public, so they're skipped.
+# ipaddress decides whether it really is an address; anything it rejects (a time, a
+# fingerprint) is ignored.
+IPV6 = re.compile(r"(?<![\w:.])(?=[0-9A-Fa-f]{1,4}:[0-9A-Fa-f]*:)[0-9A-Fa-f:]+(?![\w:]|\.\w)")
+
+
+def public_addresses(line):
+    """Global (public) IPv4/IPv6 addresses in a line of text."""
+    found = []
+    for pattern, cls in ((IPV4, ipaddress.IPv4Address), (IPV6, ipaddress.IPv6Address)):
+        for m in pattern.findall(line):
+            try:
+                ip = cls(m)
+            except ValueError:
+                continue  # not an address (octet > 255, a time, a fingerprint)
+            if ip.is_global:
+                found.append(ip)
+    return found
 
 
 def deploy_step():
@@ -86,9 +110,34 @@ class ExcludesArray(unittest.TestCase):
             self.assertFalse((dst / "node_modules").exists())
 
 
+class Matcher(unittest.TestCase):
+    # Synthetic public addresses are built from parts at runtime so the tree scan
+    # below doesn't flag this file. They are well-known public resolvers, not fleet hosts.
+    GLOBAL4 = "8.8." + "4.4"
+    GLOBAL6 = "2606:4700:" + ":1111"
+
+    def test_documentation_and_private_ranges_pass(self):
+        for line in ('"ip": "203.0.113.10"', "ssh 192.0.2.50", "198.51.100.7:8443",
+                     "10.1.2.3/8", "127.0.0.1", "0.0.0.0:22", "inet6 2001:db8::5/64",
+                     "fe80::1", "::1", "::"):
+            self.assertEqual(public_addresses(line), [], line)
+
+    def test_global_addresses_are_flagged(self):
+        for line in (f'"ip": "{self.GLOBAL4}"', f"ends a sentence {self.GLOBAL4}.",
+                     f"{self.GLOBAL4}:22", f"inet6 {self.GLOBAL6}/64",
+                     f"[{self.GLOBAL6}]:443", f"to {self.GLOBAL6}."):
+            self.assertEqual(len(public_addresses(line)), 1, line)
+
+    def test_non_addresses_are_ignored(self):
+        for line in ("uses: tool@v1.2.3.4", "version 8.8.4.4.1",
+                     "Date: 19:39:29", "MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+                     "a[::2]", "echo ::add-mask::x", "std::vector", "SHA256:nEHWQurrW4s3cqbmkaHeoWy1"):
+            self.assertEqual(public_addresses(line), [], line)
+
+
 @unittest.skipUnless(shutil.which("git") and (ROOT / ".git").exists(), "not a git checkout")
 class NoPublicAddresses(unittest.TestCase):
-    def test_tracked_files_hold_no_public_ipv4(self):
+    def test_tracked_files_hold_no_public_address(self):
         files = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], check=True,
                                capture_output=True, text=True).stdout.split("\0")
         hits = []
@@ -101,16 +150,12 @@ class NoPublicAddresses(unittest.TestCase):
             except UnicodeDecodeError:
                 continue
             for n, line in enumerate(text.splitlines(), 1):
-                for m in IPV4.findall(line):
-                    try:
-                        ip = ipaddress.IPv4Address(m)
-                    except ValueError:
-                        continue  # not an address (octet > 255)
-                    if ip.is_global:
-                        # Report file:line only, never the address itself.
-                        hits.append(f"{name}:{n}")
-        self.assertEqual(hits, [], "public IPv4 address in tracked files; use RFC 5737 "
-                                   "TEST-NET (192.0.2.x, 198.51.100.x, 203.0.113.x)")
+                if public_addresses(line):
+                    # Report file:line only, never the address itself.
+                    hits.append(f"{name}:{n}")
+        self.assertEqual(hits, [], "public IP address in tracked files; use RFC 5737 "
+                                   "TEST-NET (192.0.2.x, 198.51.100.x, 203.0.113.x) or "
+                                   "2001:db8::/32")
 
 
 if __name__ == "__main__":
