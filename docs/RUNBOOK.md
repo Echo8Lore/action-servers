@@ -41,6 +41,7 @@ fleet host" (key `disk`) and a log warning: open the run's check-disk legs to se
 | Alert: "Disk over threshold on: <host>" | `docker system prune` / `builder prune` on that host (**Disk** below) |
 | Alert: "SSH unreachable ... disk not checked, on: <host>" | The monitor could not log in (host down, `<PREFIX>_VPS_*` secrets missing or wrong, or `df` unreadable). The leg's Probe step has the `::error::`. If that host's runners are offline too, the box is down |
 | Alert: "HOST KEY MISMATCH ... on: <host>" | Nothing was run on the host. See **Host key changed** below; don't re-pin blindly |
+| Runner got "shutdown signal" around 06:00-07:00 UTC | unattended-upgrades + needrestart restarted it: check the host has the drop-in (**Package upgrades and runners** below; Fleet Inventory warns if not) |
 | Job stuck in-progress >60m | Cancel the run in the Actions UI; check the runner is healthy |
 | Deploy failed | Re-run the deploy workflow; or `deploy/deploy.sh` locally; rollback = re-deploy previous ref |
 | Token expired (registration) | Mint a fresh one with `gh api ... registration-token` |
@@ -69,6 +70,36 @@ journalctl -u 'actions.runner.*' -n 100 --no-pager     # recent logs
 # Manual on the host:
 sudo systemctl restart actions.runner.<target-slug>.<name>.service
 ```
+
+### Package upgrades and runners (needrestart, OPS-49)
+Both CI boxes run unattended-upgrades daily (`apt-daily-upgrade.timer`, ~06:00-07:00
+UTC). Ubuntu's apt hook then runs needrestart in automatic mode, which restarts every
+service still using an upgraded library. For a runner that kills its running job ("The
+runner has received a shutdown signal"; CI-2, 2026-09-28). `runners/bootstrap-host.sh`
+therefore installs `/etc/needrestart/conf.d/50-actions-runner.conf`:
+```perl
+$nrconf{override_rc}{qr(^actions\.runner\.)} = 0;
+```
+Security updates still install and every other service is still restarted; the runner
+units are listed under "Service restarts being deferred" instead. Check a host:
+```bash
+cat /etc/needrestart/conf.d/50-actions-runner.conf
+sudo needrestart -r l      # list mode, restarts nothing; outdated runners appear under "deferred"
+```
+**Fleet Inventory** reports it per host ("Upgrades vs runners" table) and warns about a
+runner host whose upgrades would restart its runners.
+
+The runners keep running the old libraries until they restart. Pick them up deliberately:
+- **Restart the units when idle.** Check the runner is not busy (`gh api
+  /orgs/<org>/actions/runners --jq '.runners[] | {name, busy}'`, or the repo's
+  `/repos/<owner>/<repo>/actions/runners`), then **Restart Self-Hosted Runner**
+  (runner-restart.yml does not check `busy`; a restart kills a running job).
+- **Reboot when `/var/run/reboot-required` exists** (kernel or libc upgrades;
+  `/var/run/reboot-required.pkgs` says which). Fleet Inventory's "Reboot required"
+  column shows it. Reboot one CI box at a time, when its runners are idle, so the other
+  box keeps the queue moving; the runner units are enabled and come back on boot.
+  Unattended-upgrades never reboots on its own (`Unattended-Upgrade::Automatic-Reboot`
+  is unset, default false).
 
 ### Add a runner
 Use `runners/register-runner.sh` (see ONBOARDING.md). Update `fleet/inventory.yml`.

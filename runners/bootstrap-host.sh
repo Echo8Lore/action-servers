@@ -10,6 +10,7 @@
 #   - Ubuntu 22.04+ with root/sudo access
 #
 # Installs (idempotent — safe to re-run):
+#   - A needrestart drop-in so package upgrades never restart runner units (OPS-49)
 #   - Base packages (curl wget git jq unzip htop python3 python3-pip
 #     python3-venv build-essential, etc.)
 #   - GitHub CLI (gh, from GitHub's apt repo)
@@ -85,6 +86,80 @@ for list in "$PACKAGES_DIR"/*.txt; do
   done < "$list"
 done
 shopt -u nullglob
+
+# ── needrestart: never auto-restart runner units (OPS-49) ────────────────
+# Ubuntu's apt hook (/etc/apt/apt.conf.d/99needrestart) runs needrestart in (a)uto
+# mode after every dpkg run, unattended-upgrades included, and it restarts every
+# service still mapping an upgraded library. For a runner that kills the job it is
+# running: on CI-2 on 2026-09-28 a systemd/libc upgrade had the runner units restarted
+# dozens of times in six minutes. The drop-in adds actions.runner.* to needrestart's
+# override_rc with 0 (= don't restart; listed under "Service restarts being deferred").
+# Upgrades still install and every other service is still restarted; runners load the
+# new libraries at their next deliberate restart or a reboot (docs/RUNBOOK.md).
+# Done before this script's own apt-get runs, so re-running bootstrap on a live host
+# can't restart its runners either. Written even where needrestart isn't installed
+# (yet): a later install keeps conf.d/ and honours it.
+echo ">>> Excluding runner units from needrestart's automatic restarts..."
+NEEDRESTART_CONF="${NEEDRESTART_CONF:-/etc/needrestart/needrestart.conf}"
+NEEDRESTART_DROPIN="${NEEDRESTART_DROPIN:-/etc/needrestart/conf.d/50-actions-runner.conf}"
+# needrestart_decides CONFIG UNIT... prints "UNIT skip|restart" per unit: CONFIG is
+# evaluated the way needrestart evaluates its config (perl; the stock needrestart.conf
+# then evals every conf.d/*.conf), and UNIT is matched against override_rc as
+# needrestart does (default: restart). Dies if CONFIG doesn't parse.
+needrestart_decides() {
+  perl -e '
+    use strict;   # needrestart evals its config under strict, with these in scope
+    our %nrconf = (verbosity => 1, override_rc => {});
+    my $LOGPREF = "[main]";
+    my $f = shift;
+    -r $f or die "$f: unreadable\n";
+    eval do { local (@ARGV, $/) = $f; <> };
+    die "$f: $@" if $@;
+    for my $u (@ARGV) {
+      my $r = 1;
+      for my $re (keys %{ $nrconf{override_rc} }) {
+        if ($u =~ /$re/) { $r = $nrconf{override_rc}{$re}; last }
+      }
+      print "$u ", ($r ? "restart" : "skip"), "\n";
+    }' "$@"
+}
+nr_tmp=$(mktemp)
+cat > "$nr_tmp" <<'NEEDRESTART_CONF'
+# Managed by action-servers runners/bootstrap-host.sh (OPS-49); edits here are
+# overwritten on the next bootstrap run.
+# Never restart GitHub Actions runner units automatically after an upgrade: the
+# restart kills the job the runner is running. They show up under "Service restarts
+# being deferred"; restart them when idle (runner-restart.yml) or reboot.
+$nrconf{override_rc}{qr(^actions\.runner\.)} = 0;
+NEEDRESTART_CONF
+# The drop-in on its own must parse, skip a runner unit and leave other services alone.
+if [[ "$(needrestart_decides "$nr_tmp" actions.runner.Owner-repo.name.service ssh.service)" \
+      != $'actions.runner.Owner-repo.name.service skip\nssh.service restart' ]]; then
+  rm -f "$nr_tmp"
+  echo "ERROR: the needrestart drop-in failed its self-check; nothing installed" >&2
+  exit 1
+fi
+install -d -m 0755 "$(dirname "$NEEDRESTART_DROPIN")"
+if cmp -s "$nr_tmp" "$NEEDRESTART_DROPIN"; then
+  echo "    ${NEEDRESTART_DROPIN} already up to date"
+else
+  install -m 0644 "$nr_tmp" "$NEEDRESTART_DROPIN"
+  echo "    wrote ${NEEDRESTART_DROPIN}"
+fi
+rm -f "$nr_tmp"
+# And the effective config (stock file plus every drop-in) must skip runner units: a
+# broken drop-in, or one overriding this one, fails the run here.
+if [[ -r "$NEEDRESTART_CONF" ]]; then
+  if ! nr_verdict=$(needrestart_decides "$NEEDRESTART_CONF" actions.runner.Owner-repo.name.service) \
+     || [[ "$nr_verdict" != *" skip" ]]; then
+    echo "ERROR: needrestart would still restart runner units (${NEEDRESTART_CONF}: ${nr_verdict:-does not evaluate});" \
+         "check the other files in $(dirname "$NEEDRESTART_DROPIN")" >&2
+    exit 1
+  fi
+  echo "    verified: needrestart skips actions.runner.* units"
+else
+  echo "    needrestart not installed; the drop-in is in place for a later install"
+fi
 
 # ── GitHub CLI apt repo (GitHub's own; Ubuntu's gh lags far behind) ──────
 # The keyring is re-downloaded on every run (GitHub rotates it, e.g. 2026-04) to a

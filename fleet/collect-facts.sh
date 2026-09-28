@@ -101,5 +101,35 @@ else
   absent "apt-mark not installed (not a Debian/Ubuntu host?)"
 fi
 
+echo "@@@ needrestart"
+# OPS-49: would a package upgrade restart the runner units? needrestart's config is
+# perl (root-owned, world-readable, assignments only); it is evaluated here the way
+# needrestart evaluates it (the stock file then evals conf.d/*.conf), and a runner
+# unit name is matched against override_rc. Same check as runners/bootstrap-host.sh
+# (needrestart_decides). Prints "runner_restart skip|restart"; nothing is restarted.
+if [ ! -r /etc/needrestart/needrestart.conf ]; then
+  absent "needrestart not installed"
+elif ! have perl; then
+  absent "perl not installed"
+else
+  perl -e '
+    use strict;
+    our %nrconf = (verbosity => 1, override_rc => {});
+    my $LOGPREF = "[main]";
+    my $f = shift;
+    eval do { local (@ARGV, $/) = $f; <> };
+    die "$@" if $@;
+    my $r = 1;
+    for my $re (keys %{ $nrconf{override_rc} }) {
+      if ($ARGV[0] =~ /$re/) { $r = $nrconf{override_rc}{$re}; last }
+    }
+    print "runner_restart ", ($r ? "restart" : "skip"), "\n";' \
+    /etc/needrestart/needrestart.conf actions.runner.Owner-repo.name.service 2>/dev/null \
+    || absent "needrestart config does not evaluate"
+fi
+
+echo "@@@ reboot_required"
+if [ -e /var/run/reboot-required ]; then echo "yes"; else echo "no"; fi
+
 echo "@@@ end"
 exit 0
