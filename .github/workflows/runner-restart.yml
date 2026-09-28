@@ -10,6 +10,7 @@ name: Restart Self-Hosted Runner
 #   - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (optional; outcome notification via
 #     ops/notify-telegram.sh, fetched from Echo8Lore/action-servers at job.workflow_sha).
 #     Called from runner-health (quiet_unless_online), only "verified online" notifies.
+#     Manual dispatches notify every outcome, including a failed restart (OPS-47).
 #
 # Multi-host: the host is chosen by ssh_secret_prefix (the host's value in
 # fleet/inventory.yml), resolved via secrets[format(...)].
@@ -84,6 +85,7 @@ jobs:
           persist-credentials: false
 
       - name: Restart runner service via SSH
+        id: restart
         env:
           UNIT: ${{ inputs.systemd_unit }}
           PREFIX: ${{ inputs.ssh_secret_prefix }}
@@ -153,6 +155,10 @@ jobs:
           fi
 
       - name: Verify runner is online
+        # always(): even a failed restart command can leave the runner online (the
+        # remote script may have run partway, or the runner was never down). This
+        # step is the ground truth; the notification (OPS-47) reports both facts.
+        if: always()
         id: verify
         env:
           GH_TOKEN: ${{ secrets.RUNNER_HEALTH_PAT }}
@@ -179,7 +185,7 @@ jobs:
           echo "::warning::Runner $TARGET_RUNNER not confirmed online after restart (may still be recovering)."
 
       - uses: actions/checkout@v5
-        if: success()
+        if: always()
         continue-on-error: true
         with:
           # Public repo, fixed location: works whichever repo calls this workflow. Same
@@ -189,9 +195,11 @@ jobs:
           sparse-checkout: ops
           persist-credentials: false
 
-      # Only claims "verified online" when the verify step actually saw it online.
+      # Runs on every outcome (OPS-47): a restart whose SSH step fails must still
+      # page a manual dispatch. Only claims "verified online" when the verify step
+      # actually saw it online; a failed restart command is never reported as one.
       - name: Telegram notification
-        if: success()
+        if: always()
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -199,14 +207,24 @@ jobs:
           TARGET_RUNNER: ${{ inputs.runner_name }}
           ONLINE: ${{ steps.verify.outputs.online }}
           QUIET: ${{ inputs.quiet_unless_online }}
+          RESTART: ${{ steps.restart.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ "$ONLINE" != "true" ] && [ "$QUIET" = "true" ]; then
             echo "Not confirmed online; no notice (runner-health's alert covers it)."
             exit 0
           fi
           if [ "$ONLINE" = "true" ]; then
-            MSG="Self-hosted runner ${TARGET_RUNNER} restarted and verified online."
+            if [ "$RESTART" = "failure" ]; then
+              MSG="Self-hosted runner ${TARGET_RUNNER}: restart command FAILED, but the runner is verified ONLINE."
+            else
+              MSG="Self-hosted runner ${TARGET_RUNNER} restarted and verified online."
+            fi
           else
-            MSG="Self-hosted runner ${TARGET_RUNNER} restart sent, but it was NOT confirmed online."
+            if [ "$RESTART" = "failure" ]; then
+              MSG="Self-hosted runner ${TARGET_RUNNER}: restart command FAILED and the runner is NOT online."
+            else
+              MSG="Self-hosted runner ${TARGET_RUNNER} restart sent, but it was NOT confirmed online."
+            fi
           fi
-          printf '%s\n' "$MSG" | bash ops/notify-telegram.sh || true
+          printf '%s\n%s\n' "$MSG" "$RUN_URL" | bash ops/notify-telegram.sh || true

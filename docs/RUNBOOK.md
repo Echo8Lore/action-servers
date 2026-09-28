@@ -18,7 +18,9 @@ changes (another runner goes offline, another host fails its disk check, a new s
 run, a scheduler finding), every 6 h while unchanged ("REPEAT"), and once more as
 "RESOLVED - fleet healthy" when everything clears. Auto-restart only notifies a restart that brought the runner back online; a
 runner that stays offline is the monitor's CRITICAL. A **Run workflow** with
-`test_alert` always sends.
+`test_alert` always sends. A manual restart dispatch notifies every outcome, including
+a failed one (OPS-47): the message says whether the restart command failed and whether
+the runner is online anyway.
 
 Disk alerts are per host (OPS-45): the alert job reads which `check-disk (<host>)` legs
 failed, and at which step, from the run's jobs API, and names the hosts by cause:
