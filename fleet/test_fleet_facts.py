@@ -13,7 +13,10 @@ What they pin:
      same role (runner hosts = "ci"; hosting-vps has no role). Only well-formed names
      are kept; a host with no role publishes none; the 30-day report carries only
      counts plus the names that differ.
-  5. Host keys (OPS-33): the driver only connects with the pinned-key options, refuses
+  5. needrestart (OPS-49): a runner host whose upgrades would restart its runner units
+     (no bootstrap drop-in, or a config that does not evaluate) is warned about; the
+     reboot-required flag is reported.
+  6. Host keys (OPS-33): the driver only connects with the pinned-key options, refuses
      a host with no pin, and fails loudly (without leaking an address) on a mismatch.
 DNS is stubbed and the driver runs with a stub ssh; nothing here touches the network.
 """
@@ -82,12 +85,16 @@ libzbar0t64
 203.0.113.10
 Not A Package; rm -rf
 __END__
+@@@ needrestart
+runner_restart restart
+@@@ reboot_required
+yes
 @@@ end
 """
 
 SECTIONS = ["hostname", "os_release", "kernel", "uptime", "disk_root", "meminfo", "ip_addrs",
             "runner_units", "runner_unit_files", "nginx_server_names", "docker", "listening_tcp",
-            "apt_manual"]
+            "apt_manual", "needrestart", "reboot_required"]
 
 DNS = {"weaponslore.com": ["192.0.2.1", "203.0.113.10"]}
 
@@ -163,6 +170,81 @@ BASE = {"build-essential", "curl", "docker-buildx-plugin", "docker-ce", "gh", "g
 INV = {"hosts": [{"id": "ovh-staging"}, {"id": "ovh-devops-001"}, {"id": "hosting-vps"}],
        "runners": [{"host": "ovh-staging", "systemd_unit": "actions.runner.A.a.service"},
                    {"host": "ovh-devops-001", "systemd_unit": "actions.runner.B.b.service"}]}
+
+
+def nr_host(hid, units, needrestart, reboot=None):
+    h = ok_host(hid, units)
+    h["needrestart"] = needrestart
+    h["reboot_required"] = reboot
+    return h
+
+
+class NeedrestartFacts(unittest.TestCase):
+    RUNNER = ["actions.runner.Echo8Lore.org-runner-02.service"]
+
+    def parsed(self, section):
+        return ff.parse_raw(RAW.split("@@@ needrestart")[0] + section + "@@@ end\n")
+
+    def test_parse_and_public(self):
+        full = ff.parse_raw(RAW)
+        self.assertEqual(full["needrestart"], {"state": "present", "runner_restart": "restart"})
+        self.assertIs(full["reboot_required"], True)
+        pub = ff.make_public(full, "h", "", [], records)
+        self.assertEqual(pub["needrestart"], {"state": "present", "runner_restart": "restart"})
+        self.assertIs(pub["reboot_required"], True)
+        full = self.parsed("@@@ needrestart\nrunner_restart skip\n@@@ reboot_required\nno\n")
+        self.assertEqual(full["needrestart"]["runner_restart"], "skip")
+        self.assertIs(full["reboot_required"], False)
+
+    def test_old_collector_absent_and_garbage(self):
+        full = self.parsed("")   # a collector from before OPS-49
+        self.assertEqual(full["needrestart"], {"state": "absent", "reason": "not collected"})
+        self.assertIsNone(full["reboot_required"])
+        full = self.parsed("@@@ needrestart\n__ABSENT__ needrestart not installed\n")
+        self.assertEqual(full["needrestart"], {"state": "absent", "reason": "needrestart not installed"})
+        full = self.parsed("@@@ needrestart\nrunner_restart maybe 203.0.113.10\n@@@ reboot_required\nperhaps\n")
+        self.assertEqual(full["needrestart"], {"state": "absent", "reason": "unexpected output"})
+        self.assertIsNone(full["reboot_required"])
+        pub = ff.make_public({"needrestart": "x", "reboot_required": "yes"}, "h", "", [], records)
+        self.assertEqual(pub["needrestart"], {"state": "absent", "reason": "not collected"})
+        self.assertIsNone(pub["reboot_required"])
+
+    def report(self, hosts):
+        rep = {"hosts": hosts, "domains": [], "drift": {k: [] for k in
+               ("missing", "misplaced", "extra", "unverified")}, "package_parity": [],
+               "generated_at": "x"}
+        rep["warnings"] = ff.warnings(rep)
+        return rep
+
+    def test_runner_host_that_would_restart_runners_is_warned(self):
+        rep = self.report([
+            nr_host("ci-2", self.RUNNER, {"state": "present", "runner_restart": "restart"}, True),
+            nr_host("ci-1", self.RUNNER, {"state": "present", "runner_restart": "skip"}, False),
+            nr_host("web", [], {"state": "present", "runner_restart": "restart"}),
+            nr_host("old", self.RUNNER, {"state": "absent", "reason": "not collected"}),
+            nr_host("none", self.RUNNER, {"state": "absent", "reason": "needrestart not installed"}),
+            nr_host("bad", self.RUNNER, {"state": "absent", "reason": "needrestart config does not evaluate"}),
+        ])
+        nr = [w for w in rep["warnings"] if w.startswith("needrestart")]
+        self.assertEqual(nr, [
+            "needrestart (ci-2): upgrades restart its runner units; run runners/bootstrap-host.sh (OPS-49)",
+            "needrestart (bad): its needrestart config does not evaluate; run runners/bootstrap-host.sh (OPS-49)"])
+        md = ff.markdown(rep)
+        self.assertIn("| ci-2 | 1 | **restart** | yes |", md)
+        self.assertIn("| ci-1 | 1 | skip | no |", md)
+        self.assertIn("| web | 0 | restart | ? |", md)
+        self.assertIn("| old | 1 | absent (not collected) | ? |", md)
+
+    def test_collect_host_ships_the_facts(self):
+        with tempfile.TemporaryDirectory() as t:
+            f = pathlib.Path(t) / "full.json"
+            f.write_text(json.dumps(ff.parse_raw(RAW)))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                ff.main(["public", str(f), "--id", "h"])
+        pub = json.loads(out.getvalue())
+        self.assertEqual(pub["needrestart"]["runner_restart"], "restart")
+        self.assertIs(pub["reboot_required"], True)
 
 
 class PackageParity(unittest.TestCase):

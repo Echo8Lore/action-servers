@@ -9,7 +9,9 @@ name: Fleet Tests
 # policy, exit codes; curl stubbed), its systemd units and installer --check, and the
 # dispatch-timer liveness check; runner-health's alert dedupe and its wiring. deploy/: host-key pinning for the deploy path (pin
 # parsing, ssh options, the preflight, every deploy ssh/rsync using them), deploy.yml's
-# rsync excludes, and no public IP address in any tracked file.
+# rsync excludes, and no public IP address in any tracked file. runners/: bootstrap's
+# needrestart drop-in (OPS-49: written before any apt-get, idempotent, verified, and
+# evaluated like needrestart does, runner units skipped and nothing else).
 # Stdlib only; no secrets, no network.
 # Hosted runner: this repo is public, so hosted minutes are free.
 
@@ -37,3 +39,5 @@ jobs:
         run: python3 -m unittest discover -s ops -v
       - name: Run deploy tests
         run: python3 -m unittest discover -s deploy -v
+      - name: Run runners tests
+        run: python3 -m unittest discover -s runners -v

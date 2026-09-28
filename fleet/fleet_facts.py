@@ -12,7 +12,8 @@ Subcommands (stdlib only; runs on ubuntu-latest's python3):
   missing  --id ID ...    -> PUBLIC json for a host whose secrets are not set
   failed   --id ID ...    -> PUBLIC json for a configured host that SSH could not reach
   report   INVENTORY DIR  -> fleet-report.json + markdown summary (drift + domain map
-                            + package parity between hosts of the same role)
+                            + package parity between hosts of the same role
+                            + whether upgrades would restart runner units, OPS-49)
 
 FULL never leaves the job except GPG-encrypted. PUBLIC is what the artifact and the step
 summary carry, because on a public repo both are readable by any logged-in GitHub user.
@@ -184,6 +185,9 @@ def parse_raw(raw):
         full["listening_tcp"] = {"state": "present", "ports": sorted(ports), "sockets": addrs}
 
     full["apt_manual"] = parse_apt_manual(s)
+    full["needrestart"] = parse_needrestart(s)
+    rr = [ln.strip() for ln in s.get("reboot_required", []) if ln.strip()]
+    full["reboot_required"] = {"yes": True, "no": False}.get(rr[0]) if rr else None
     return full
 
 
@@ -210,6 +214,22 @@ def parse_apt_manual(s):
     if r:
         return {"state": "absent", "reason": r}
     return {"state": "present", "packages": package_names(ln for ln in lines if ln != "__END__")}
+
+
+def parse_needrestart(s):
+    """OPS-49: would needrestart restart runner units after an upgrade ("restart") or
+    skip them ("skip", the bootstrap drop-in)?"""
+    if "needrestart" not in s:   # a collector from before OPS-49
+        return {"state": "absent", "reason": "not collected"}
+    lines = s["needrestart"]
+    r = absent_reason(lines)
+    if r:
+        return {"state": "absent", "reason": r}
+    for ln in lines:
+        f = ln.split()
+        if len(f) == 2 and f[0] == "runner_restart" and f[1] in ("skip", "restart"):
+            return {"state": "present", "runner_restart": f[1]}
+    return {"state": "absent", "reason": "unexpected output"}
 
 
 # ── public ───────────────────────────────────────────────────────────────────
@@ -301,7 +321,16 @@ def make_public(full, host_id, target, domains, records_for=domain_records, role
         "public_ip_counts": {"ipv4": v4, "ipv6": len(public_ips) - v4},
         "domains": doms,
         "apt_manual": public_apt(apt, apt_pkgs, role),
+        "needrestart": public_needrestart(full.get("needrestart")),
+        "reboot_required": full.get("reboot_required") if isinstance(full.get("reboot_required"), bool) else None,
     }
+
+
+def public_needrestart(nr):
+    nr = as_dict(nr)
+    if state_of(nr) == "present" and nr.get("runner_restart") in ("skip", "restart"):
+        return {"state": "present", "runner_restart": nr["runner_restart"]}
+    return {"state": "absent", "reason": nr.get("reason") if isinstance(nr.get("reason"), str) else "not collected"}
 
 
 def public_apt(apt, pkgs, role):
@@ -505,7 +534,40 @@ def markdown(report):
             L += ["| Package | Present on | Missing on |", "|---|---|---|"]
             for d in g["differences"]:
                 L.append(f"| {d['package']} | {', '.join(d['present_on'])} | **{', '.join(d['missing_on'])}** |")
+    L += ["", "### Upgrades vs runners (OPS-49)", "",
+          "needrestart: whether a package upgrade would restart this host's runner units "
+          "(`skip` = the runners/bootstrap-host.sh drop-in is in effect). Reboot required: "
+          "/var/run/reboot-required exists (runners and the kernel still run the old code).", "",
+          "| Host | Runner units | needrestart | Reboot required |", "|---|---|---|---|"]
+    for h in report["hosts"]:
+        if h.get("status") != "ok":
+            continue
+        nr = as_dict(h.get("needrestart"))
+        nstr = (nr.get("runner_restart") if nr.get("state") == "present"
+                else f"absent ({nr.get('reason') or 'not collected'})")
+        if nstr == "restart":
+            nstr = "**restart**" if runner_count(h) else "restart"
+        rb = h.get("reboot_required")
+        L.append(f"| {h.get('id')} | {runner_count(h)} | {nstr} | "
+                 f"{'yes' if rb is True else 'no' if rb is False else '?'} |")
     return "\n".join(L) + "\n"
+
+
+def runner_count(h):
+    units = h.get("runner_units")
+    return len([u for u in units if isinstance(u, dict)]) if isinstance(units, list) else 0
+
+
+def needrestart_problem(h):
+    """Why needrestart may restart this host's runner units mid-job, or None."""
+    if h.get("status") != "ok" or not runner_count(h):
+        return None
+    nr = as_dict(h.get("needrestart"))
+    if nr.get("state") == "present":
+        return "upgrades restart its runner units" if nr.get("runner_restart") == "restart" else None
+    if nr.get("reason") == "needrestart config does not evaluate":
+        return "its needrestart config does not evaluate"
+    return None
 
 
 def warnings(report):
@@ -537,6 +599,10 @@ def warnings(report):
             if not u["reason"].startswith("apt_manual"):
                 continue   # an unreachable/unconfigured host is already warned about above
             w.append(f"package parity ({g['role']}): {u['host']} not compared ({u['reason']})")
+    for h in report["hosts"]:
+        why = needrestart_problem(h)
+        if why:
+            w.append(f"needrestart ({h['id']}): {why}; run runners/bootstrap-host.sh (OPS-49)")
     return w
 
 
