@@ -87,7 +87,7 @@ for list in "$PACKAGES_DIR"/*.txt; do
 done
 shopt -u nullglob
 
-# ── needrestart: never auto-restart runner units (OPS-49) ────────────────
+# ── needrestart: never auto-restart runner units or containerd (OPS-49/51) ──
 # Ubuntu's apt hook (/etc/apt/apt.conf.d/99needrestart) runs needrestart in (a)uto
 # mode after every dpkg run, unattended-upgrades included, and it restarts every
 # service still mapping an upgraded library. For a runner that kills the job it is
@@ -96,6 +96,9 @@ shopt -u nullglob
 # override_rc with 0 (= don't restart; listed under "Service restarts being deferred").
 # Upgrades still install and every other service is still restarted; runners load the
 # new libraries at their next deliberate restart or a reboot (docs/RUNBOOK.md).
+# OPS-51: containerd.service is deferred the same way — a restart kills in-flight
+# docker builds and BuildKit sessions (running containers survive via shim v2), and
+# libc upgrades restart containerd on the stock config (CI-2 2026-09-28 06:33:59Z).
 # Done before this script's own apt-get runs, so re-running bootstrap on a live host
 # can't restart its runners either. Written even where needrestart isn't installed
 # (yet): a later install keeps conf.d/ and honours it.
@@ -125,16 +128,19 @@ needrestart_decides() {
 }
 nr_tmp=$(mktemp)
 cat > "$nr_tmp" <<'NEEDRESTART_CONF'
-# Managed by action-servers runners/bootstrap-host.sh (OPS-49); edits here are
-# overwritten on the next bootstrap run.
+# Managed by action-servers runners/bootstrap-host.sh (OPS-49, OPS-51); edits here
+# are overwritten on the next bootstrap run.
 # Never restart GitHub Actions runner units automatically after an upgrade: the
 # restart kills the job the runner is running. They show up under "Service restarts
 # being deferred"; restart them when idle (runner-restart.yml) or reboot.
+# Never restart containerd automatically either (OPS-51): an in-flight docker
+# build or BuildKit session dies with it, and runner jobs run long ones.
 $nrconf{override_rc}{qr(^actions\.runner\.)} = 0;
+$nrconf{override_rc}{qr(^containerd\.service$)} = 0;
 NEEDRESTART_CONF
-# The drop-in on its own must parse, skip a runner unit and leave other services alone.
-if [[ "$(needrestart_decides "$nr_tmp" actions.runner.Owner-repo.name.service ssh.service)" \
-      != $'actions.runner.Owner-repo.name.service skip\nssh.service restart' ]]; then
+# The drop-in on its own must parse, skip runner and containerd units, leave others.
+if [[ "$(needrestart_decides "$nr_tmp" actions.runner.Owner-repo.name.service containerd.service ssh.service)" \
+      != $'actions.runner.Owner-repo.name.service skip\ncontainerd.service skip\nssh.service restart' ]]; then
   rm -f "$nr_tmp"
   echo "ERROR: the needrestart drop-in failed its self-check; nothing installed" >&2
   exit 1
@@ -150,13 +156,13 @@ rm -f "$nr_tmp"
 # And the effective config (stock file plus every drop-in) must skip runner units: a
 # broken drop-in, or one overriding this one, fails the run here.
 if [[ -r "$NEEDRESTART_CONF" ]]; then
-  if ! nr_verdict=$(needrestart_decides "$NEEDRESTART_CONF" actions.runner.Owner-repo.name.service) \
-     || [[ "$nr_verdict" != *" skip" ]]; then
-    echo "ERROR: needrestart would still restart runner units (${NEEDRESTART_CONF}: ${nr_verdict:-does not evaluate});" \
+  if ! nr_verdict=$(needrestart_decides "$NEEDRESTART_CONF" actions.runner.Owner-repo.name.service containerd.service) \
+     || [[ "$nr_verdict" != $'actions.runner.Owner-repo.name.service skip\ncontainerd.service skip' ]]; then
+    echo "ERROR: needrestart would still restart runner units or containerd (${NEEDRESTART_CONF}: ${nr_verdict:-does not evaluate});" \
          "check the other files in $(dirname "$NEEDRESTART_DROPIN")" >&2
     exit 1
   fi
-  echo "    verified: needrestart skips actions.runner.* units"
+  echo "    verified: needrestart skips actions.runner.* units and containerd.service"
 else
   echo "    needrestart not installed; the drop-in is in place for a later install"
 fi

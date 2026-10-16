@@ -11,8 +11,9 @@ What they pin:
      rewritten), verifies the effective config, and fails on a drop-in that breaks
      parsing or undoes the override.
   3. Evaluated the way needrestart evaluates it (a stub of Ubuntu's needrestart.conf:
-     strict, $LOGPREF, the conf.d loop), runner units are skipped while other services
-     are still restarted, and fleet/collect-facts.sh reaches the same verdict.
+     strict, $LOGPREF, the conf.d loop), runner units and containerd are skipped
+     while other services are still restarted (OPS-51), and fleet/collect-facts.sh
+     reaches the same verdict.
 The block runs against a temp dir, never /etc; perl is needed (as on every Ubuntu host).
 """
 
@@ -28,6 +29,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BOOTSTRAP = (ROOT / "runners" / "bootstrap-host.sh").read_text()
 COLLECT = (ROOT / "fleet" / "collect-facts.sh").read_text()
 DROPIN_LINE = r"$nrconf{override_rc}{qr(^actions\.runner\.)} = 0;"
+CONTAINERD_LINE = r"$nrconf{override_rc}{qr(^containerd\.service$)} = 0;"
 RUNNERS = ["actions.runner.Echo8Lore.org-runner-02.service",
            "actions.runner.ResearchMonkey-FieldKit.personal-fieldkit-02.service",
            "actions.runner.Echo8Lore-Weapons_Lore.vps-ci-runner-01.service"]
@@ -66,7 +68,7 @@ class Static(unittest.TestCase):
         self.assertIn('NEEDRESTART_DROPIN="${NEEDRESTART_DROPIN:-/etc/needrestart/conf.d/50-actions-runner.conf}"',
                       BLOCK)
         body = section(BLOCK, "<<'NEEDRESTART_CONF'\n", "\nNEEDRESTART_CONF\n")
-        self.assertEqual([ln for ln in body.splitlines() if not ln.startswith("#")][1:], [DROPIN_LINE])
+        self.assertEqual([ln for ln in body.splitlines() if not ln.startswith("#")][1:], [DROPIN_LINE, CONTAINERD_LINE])
 
     def test_written_before_the_first_apt_get(self):
         self.assertLess(BOOTSTRAP.index("# ── needrestart:"), BOOTSTRAP.index("apt-get"))
@@ -107,17 +109,18 @@ class Behaviour(unittest.TestCase):
         self.assertEqual(set(self.decide(*RUNNERS).values()), {"restart"})
         self.assertEqual(self.collect(), ["runner_restart restart"])
 
-    def test_writes_verifies_and_skips_only_runner_units(self):
+    def test_writes_verifies_and_skips_runner_units_and_containerd(self):
         p = self.run_block()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("wrote", p.stdout)
-        self.assertIn("verified: needrestart skips actions.runner.* units", p.stdout)
+        self.assertIn("verified: needrestart skips actions.runner.* units and containerd.service", p.stdout)
         self.assertEqual(self.dropin.stat().st_mode & 0o777, 0o644)
         self.assertIn(DROPIN_LINE + "\n", self.dropin.read_text())
+        self.assertIn(CONTAINERD_LINE + "\n", self.dropin.read_text())
         got = self.decide(*RUNNERS, "ssh.service", "containerd.service", "dbus.service",
                           "my-actions.runner.x.service")
         self.assertEqual(got, {**{u: "skip" for u in RUNNERS}, "ssh.service": "restart",
-                               "containerd.service": "restart", "dbus.service": "skip",
+                               "containerd.service": "skip", "dbus.service": "skip",
                                "my-actions.runner.x.service": "restart"})
         self.assertEqual(self.collect(), ["runner_restart skip"])
 
