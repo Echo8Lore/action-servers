@@ -67,6 +67,13 @@ runners:
     labels: [self-hosted, Linux, X64, fieldkit]
     systemd_unit: actions.runner.ResearchMonkey-FieldKit.personal-fieldkit-02.service
 
+  - name: personal-fieldkit-03
+    host: ovh-staging
+    scope: repo
+    target: ResearchMonkey/FieldKit
+    labels: [self-hosted, Linux, X64, fieldkit]
+    systemd_unit: actions.runner.ResearchMonkey-FieldKit.personal-fieldkit-03.service
+
   - name: wh40k-runner-02
     host: ovh-devops-001
     scope: repo
