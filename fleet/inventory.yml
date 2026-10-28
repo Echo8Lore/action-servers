@@ -17,7 +17,9 @@ hosts:
     disk_threshold: 85            # traffic: weaponslore.com's DNS doesn't point at it
                                   # (OPS-28 poll).
 
-  - id: hosting-vps            # OVH vps-e0eef96f, the staging web host (weaponslore.com).
+  - id: hosting-vps            # OVH vps-e0eef96f, the production web host (weaponslore.com;
+                                # sole web host per the OPS-17 role ADR — 'staging' was a
+                                # mislabel, settled 2026-10-28 on OPS-52).
     ssh_secret_prefix: HOSTING # Web only: no runners are ever placed here (OPS-17).
     disk_threshold: 85
 
