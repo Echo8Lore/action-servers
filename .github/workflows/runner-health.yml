@@ -254,8 +254,12 @@ jobs:
           for repo in $REPOS; do
             RAW=$(mktemp)
             if gh api "repos/${repo}/actions/runs?status=in_progress&per_page=100" > "$RAW" 2>/dev/null; then
+              # Age by run_started_at (this attempt's start): re-runs keep the
+              # original run's created_at, so a fresh re-run of an old run would
+              # look instantly >60min stale (OPS-73). created_at is only the
+              # null-fallback (queued runs).
               ITEMS=$(jq -c --arg th "$THRESHOLD" --arg r "$repo" \
-                '[.workflow_runs[] | select(.created_at < $th) | {repo:$r, name, created_at, html_url}]' "$RAW" 2>/dev/null || echo '[]')
+                '[.workflow_runs[] | select((.run_started_at // .created_at) < $th) | {repo:$r, name, created_at, run_started_at, html_url}]' "$RAW" 2>/dev/null || echo '[]')
               STALE=$(jq -c -n --argjson a "$STALE" --argjson b "$ITEMS" '$a + $b')
             fi
             rm -f "$RAW"
@@ -264,7 +268,7 @@ jobs:
           COUNT=$(echo "$STALE" | jq 'length')
           echo "stale_count=${COUNT}" >> "$GITHUB_OUTPUT"
           if [ "$COUNT" -gt 0 ]; then
-            SUMMARY=$(echo "$STALE" | jq -r '[.[0:5][] | "  - \(.repo): \(.name) — started \(.created_at)"] | join("\\n")')
+            SUMMARY=$(echo "$STALE" | jq -r '[.[0:5][] | "  - \(.repo): \(.name) — started \(.run_started_at // .created_at) — \(.html_url)"] | join("\n")')
             echo "stale_summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
             echo "::warning::${COUNT} stale run(s) >60min"
           else
