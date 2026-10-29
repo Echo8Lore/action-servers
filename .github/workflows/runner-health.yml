@@ -387,7 +387,7 @@ jobs:
           fi
           if [ "$ANY_OFFLINE" = "true" ]; then
             LIST=$(echo "$OFFLINE_RUNNERS" | jq -r 'join(", ")' 2>/dev/null || echo "$OFFLINE_RUNNERS")
-            MESSAGE="${MESSAGE}CRITICAL - Runner(s) OFFLINE: ${LIST}\nAuto-restart firing.\n\n"
+            MESSAGE="${MESSAGE}CRITICAL - Runner(s) OFFLINE: ${LIST}\nAuto-restart firing.\nAction: if one stays offline after the restart, SSH its host (fleet/inventory.yml) and check the unit.\n\n"
           fi
           if [ "$DISK_WARNING" = "true" ]; then
             DISK_TEXT=$(python3 ops/alert_dedupe.py disk-message --disk true --legs "$DISK_LEGS") \
@@ -395,7 +395,7 @@ jobs:
             MESSAGE="${MESSAGE}${DISK_TEXT}\n\n"
           fi
           if [ -n "$STALE_COUNT" ] && [ "$STALE_COUNT" != "0" ]; then
-            MESSAGE="${MESSAGE}WARNING - ${STALE_COUNT} stale run(s) (>60min):\n${STALE_SUMMARY}\n\n"
+            MESSAGE="${MESSAGE}HIGH - ${STALE_COUNT} stale run(s) (>60min):\n${STALE_SUMMARY}\nAction: check the run's runner or cancel it - in progress >60min is likely wedged.\n\n"
           fi
           if [ -n "$SCHEDULER_MESSAGE" ]; then
             MESSAGE="${MESSAGE}${SCHEDULER_MESSAGE}\n\n"

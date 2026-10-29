@@ -74,12 +74,12 @@ DISK_STEPS = {
 }
 DISK_KEY_PREFIX = {"disk": "disk", "unknown": "disk", "ssh": "disk-ssh", "hostkey": "disk-hostkey"}
 DISK_LINES = [   # (cause, message prefix); one line per cause, hosts listed
-    ("disk", "WARNING - Disk over threshold on: "),
-    ("hostkey", "WARNING - HOST KEY MISMATCH (or no pinned key), disk not checked, on: "),
-    ("ssh", "WARNING - SSH unreachable (or secrets missing), disk not checked, on: "),
-    ("unknown", "WARNING - check-disk failed (cause not reported) on: "),
+    ("disk", "HIGH - Disk over threshold on: "),
+    ("hostkey", "HIGH - HOST KEY MISMATCH (or no pinned key), disk not checked, on: "),
+    ("ssh", "HIGH - SSH unreachable (or secrets missing), disk not checked, on: "),
+    ("unknown", "HIGH - check-disk failed (cause not reported) on: "),
 ]
-DISK_FALLBACK = ("WARNING - Disk over threshold (or SSH unreachable, or host key mismatch) "
+DISK_FALLBACK = ("HIGH - Disk over threshold (or SSH unreachable, or host key mismatch) "
                  "on a fleet host - see the check-disk legs of this run")
 LEG_NAME = re.compile(r"^check-disk \((.+)\)$")
 RESOLVED = "RESOLVED - fleet healthy: every condition from the last page has cleared."
@@ -132,7 +132,10 @@ def disk_message(disk, legs):
         hosts = [h for h, c in legs if c == cause]
         if hosts:
             lines.append(prefix + ", ".join(hosts))
-    return "\n".join(lines) + "\nSee the check-disk legs of this run."
+    return ("\n".join(lines)
+            + "\nSee the check-disk legs of this run."
+            + "\nAction: SSH the host (fleet/inventory.yml) - clear space, or fix the"
+              " access problem the leg names (OPS-75).")
 
 
 def condition_keys(any_offline="", offline_runners="", disk="", stale_count="",
