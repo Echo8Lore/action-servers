@@ -9,7 +9,7 @@ then asks this helper whether to send it:
       --message MSG.txt --out SEND.txt --run-url URL \
       [--any-offline true] [--offline-runners JSON] [--disk true] [--disk-legs LEGS] \
       [--stale-count N] [--stale-summary TEXT] [--scheduler-keys TEXT] \
-      [--incomplete true] [--test-alert true] [--repeat-min 360]
+      [--restart-keys KEYS] [--incomplete true] [--test-alert true] [--repeat-min 360]
 
 The fingerprint is sha256 over the SORTED condition keys, never the prose, so wording,
 counts and timestamps in the message don't re-page:
@@ -26,6 +26,9 @@ counts and timestamps in the message don't re-page:
                                                   start time: stable while it is stuck)
   scheduler:<level>:<workflow>:<quiet slots>      from dispatch_liveness.py --keys (the
                                                   h/e counts are not part of it)
+  restart-path-failing:<runner>                  the auto-restart path is broken:
+                                                  recent runner-restart runs for that
+                                                  runner failed (restart_liveness.py)
 
 Decision:
   keys, fingerprint changed (or never paged)   -> send the message; state = {fp, now}
@@ -139,7 +142,8 @@ def disk_message(disk, legs):
 
 
 def condition_keys(any_offline="", offline_runners="", disk="", stale_count="",
-                   stale_summary="", scheduler_keys="", disk_legs=None):
+                   stale_summary="", scheduler_keys="", disk_legs=None,
+                   restart_keys=""):
     keys = set()
     if truthy(any_offline):
         try:
@@ -162,6 +166,12 @@ def condition_keys(any_offline="", offline_runners="", disk="", stale_count="",
         keys |= {f"stale:{ln}" for ln in lines} or {f"stale:count={stale_count}"}
     for ln in (scheduler_keys or "").splitlines():
         if ln.strip().startswith("scheduler:"):
+            keys.add(ln.strip())
+    # restart_liveness.py --keys writes one `restart-path-failing:<runner>` per
+    # runner whose auto-restart failed (OPS-48); like scheduler keys, they arrive
+    # already key-shaped, and anything else in the file is ignored.
+    for ln in (restart_keys or "").splitlines():
+        if ln.strip().startswith("restart-path-failing:"):
             keys.add(ln.strip())
     return sorted(keys)
 
@@ -230,6 +240,7 @@ def main(argv=None):
     p.add_argument("--stale-count", default="")
     p.add_argument("--stale-summary", default="")
     p.add_argument("--scheduler-keys", default="")
+    p.add_argument("--restart-keys", default="")
     p.add_argument("--incomplete", default="")
     p.add_argument("--test-alert", default="")
     p.add_argument("--repeat-min", type=int, default=REPEAT_MIN)
@@ -254,7 +265,8 @@ def main(argv=None):
         message = ""
     keys = condition_keys(a.any_offline, a.offline_runners, a.disk, a.stale_count,
                           a.stale_summary, a.scheduler_keys,
-                          parse_disk_legs(read_optional(a.disk_legs)))
+                          parse_disk_legs(read_optional(a.disk_legs)),
+                          restart_keys=read_optional(a.restart_keys) or "")
     action, text, new_state = decide(state, keys, message, now_utc(), a.run_url,
                                      a.repeat_min, truthy(a.test_alert), truthy(a.incomplete))
     pathlib.Path(a.out).write_text(text)

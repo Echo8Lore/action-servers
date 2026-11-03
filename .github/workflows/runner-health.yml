@@ -318,7 +318,8 @@ jobs:
   # Dedupe (ops/alert_dedupe.py): at the dispatch cadence (every 30 min) an ongoing
   # incident would otherwise page ~48x a day. The page is fingerprinted by its condition
   # KEYS (offline runner names, disk:<host> per failed check-disk leg, stale runs,
-  # scheduler findings), not its prose.
+  # scheduler findings, restart-path-failing:<runner> per runner whose auto-restart
+  # failed, OPS-48), not its prose.
   # It is sent when the fingerprint changes or is 6 h old, plus one "RESOLVED" when
   # everything clears; test_alert bypasses it. State ({fingerprint, paged_at}) lives in
   # the Actions cache like queue-watchdog's: saved under a new key each run, restored by
@@ -385,9 +386,30 @@ jobs:
               rm -f "$DISK_LEGS"
             fi
           fi
+
+          # Did the auto-restart path itself fail? (OPS-48) auto-restart below fires
+          # runner-restart (quiet mode) for every offline runner, and a restart path
+          # that keeps failing would surface only as the OFFLINE CRITICAL repeating
+          # every 6 h. The helper lists this repo's recent failed runner-restart runs
+          # with GITHUB_TOKEN (actions: read above), counts only runs the
+          # auto-restart itself fired (event workflow_call -- manual dispatches page
+          # on their own, OPS-47), and maps each to its runner via the run's jobs
+          # (the restart job's name carries the target). It never fails this job:
+          # an API error or a helper crash warns and alerts nothing (no message
+          # file -> no lines; no keys file -> no restart keys).
+          RESTART_MSG="$RUNNER_TEMP/restart.txt"
+          RESTART_KEYS="$RUNNER_TEMP/restart-keys.txt"
+          python3 ops/restart_liveness.py check \
+            --repo "$GITHUB_REPOSITORY" --message "$RESTART_MSG" --keys "$RESTART_KEYS" \
+            || echo "::warning::restart liveness helper failed; restart-path not checked"
+          RESTART_MESSAGE=$(cat "$RESTART_MSG" 2>/dev/null || true)
+
           if [ "$ANY_OFFLINE" = "true" ]; then
             LIST=$(echo "$OFFLINE_RUNNERS" | jq -r 'join(", ")' 2>/dev/null || echo "$OFFLINE_RUNNERS")
             MESSAGE="${MESSAGE}CRITICAL - Runner(s) OFFLINE: ${LIST}\nAuto-restart firing.\nAction: if one stays offline after the restart, SSH its host (fleet/inventory.yml) and check the unit.\n\n"
+          fi
+          if [ -n "$RESTART_MESSAGE" ]; then
+            MESSAGE="${MESSAGE}${RESTART_MESSAGE}\n\n"
           fi
           if [ "$DISK_WARNING" = "true" ]; then
             DISK_TEXT=$(python3 ops/alert_dedupe.py disk-message --disk true --legs "$DISK_LEGS") \
@@ -430,6 +452,7 @@ jobs:
             --disk "$DISK_WARNING" --disk-legs "$DISK_LEGS" \
             --stale-count "$STALE_COUNT" --stale-summary="$STALE_SUMMARY" \
             --scheduler-keys="$SCHEDULER_KEYS" \
+            --restart-keys "$RESTART_KEYS" \
             --incomplete "$INCOMPLETE" --test-alert "$TEST_ALERT" || drc=$?
           if [ "$drc" -ne 0 ]; then
             echo "::warning::alert dedupe failed (exit ${drc}); sending undeduplicated, state unchanged."
@@ -472,6 +495,8 @@ jobs:
       ssh_secret_prefix: ${{ matrix.runner.prefix }}
       runners_api: ${{ matrix.runner.api }}
       # A failed restart is already this run's CRITICAL (deduplicated above); only the
-      # state change "restarted and verified online" pages from the restart itself.
+      # state change "restarted and verified online" pages from the restart itself. A
+      # restart path that keeps failing pages restart-path-failing:<runner> from the
+      # next monitor run (ops/restart_liveness.py, OPS-48).
       quiet_unless_online: true
     secrets: inherit

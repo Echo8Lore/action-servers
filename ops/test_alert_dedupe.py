@@ -7,7 +7,9 @@ Cases: first page; same condition within 6 h suppressed; condition changed pages
 6 h repeat; resolved (once); test_alert bypass; a failed send does not adopt the state
 (decide never writes STATE, and the workflow adopts NEW only after notify-telegram.sh
 exits 0); keys ignore prose and counts; per-host disk keys from the jobs API legs
-(OPS-45), a second host crossing pages at once, API failure falls back to one "disk" key.
+(OPS-45), a second host crossing pages at once, API failure falls back to one "disk" key;
+restart-path-failing:<runner> keys from ops/restart_liveness.py (OPS-48) page, dedupe
+and clear like any other condition.
 """
 
 import datetime as dt
@@ -51,6 +53,13 @@ class Keys(unittest.TestCase):
     def test_scheduler_keys_only(self):
         self.assertEqual(ad.condition_keys(scheduler_keys="scheduler:NOTICE:runner-health.yml:b\n\njunk\n"),
                          ["scheduler:NOTICE:runner-health.yml:b"])
+
+    def test_restart_keys_only(self):
+        # restart_liveness.py --keys: one restart-path-failing:<runner> per
+        # failing runner (OPS-48); anything else in the file is ignored.
+        self.assertEqual(ad.condition_keys(restart_keys="restart-path-failing:r1\n\njunk\noffline\n"),
+                         ["restart-path-failing:r1"])
+        self.assertEqual(ad.condition_keys(restart_keys="junk\n"), [])
 
     def test_fingerprint_is_order_free_and_prose_free(self):
         a = ad.fingerprint(["offline:r1", "disk"])
@@ -198,6 +207,16 @@ class Decide(unittest.TestCase):
         action, text, _ = ad.decide(st, self.KEYS, MSG, later(30), test_alert=True)
         self.assertEqual((action, text), ("page", MSG))
 
+    def test_restart_path_failing_pages_dedupes_and_clears(self):
+        keys = ["restart-path-failing:r1"]
+        action, _, st = ad.decide({}, keys, "m", T0)
+        self.assertEqual(action, "page")
+        self.assertEqual(ad.decide(st, keys, "m again", later(30))[0], "suppress")
+        # The restart starts succeeding: the last failed run ages out of the
+        # window and the condition clears like any other.
+        action, text, st = ad.decide(st, [], "", later(60))
+        self.assertEqual(action, "resolved")
+
     def test_junk_state_is_a_first_page(self):
         for junk in (None, [], "x", {"fingerprint": 5}, {"fingerprint": "ab", "paged_at": "never"}):
             self.assertEqual(ad.decide(junk, self.KEYS, MSG, T0)[0], "page", junk)
@@ -252,6 +271,16 @@ class Main(unittest.TestCase):
         with unittest.mock.patch("builtins.print") as pr:
             ad.main(["disk-message", "--disk", "true", "--legs", str(d / "missing")])
         self.assertEqual(pr.call_args[0][0], ad.DISK_FALLBACK)
+
+    def test_restart_keys_file(self):
+        d = pathlib.Path(self.tmp.name)
+        (d / "rk").write_text("restart-path-failing:r1\njunk\n")
+        want = ad.fingerprint(["restart-path-failing:r1"])
+        _, new, _ = self.run_main({}, restart_keys=str(d / "rk"))
+        self.assertEqual(new["fingerprint"], want)
+        # No file (the helper crashed before writing one): no restart keys.
+        _, new, _ = self.run_main({}, restart_keys=str(d / "missing"))
+        self.assertEqual(new["fingerprint"], "")
 
     def test_suppressed_writes_empty_out(self):
         st = {"fingerprint": ad.fingerprint(["offline:r1"]), "paged_at": "2026-09-27T11:30:00Z"}
@@ -323,6 +352,17 @@ class Wiring(unittest.TestCase):
         self.assertIn("quiet_unless_online:", call)
         dispatch = restart[restart.index("  workflow_dispatch:"):restart.index("  workflow_call:")]
         self.assertNotIn("quiet_unless_online", dispatch)   # manual runs keep the failure notice
+
+    def test_restart_liveness_wired_into_alert(self):
+        # OPS-48: the alert job runs restart_liveness.py (failed runner-restart
+        # runs -> per-runner message + keys), appends its message to the alert
+        # body and feeds its keys file to the dedupe.
+        job = self.alert_job()
+        self.assertIn("python3 ops/restart_liveness.py check", job)
+        self.assertIn('--message "$RESTART_MSG"', job)
+        self.assertIn('--keys "$RESTART_KEYS"', job)
+        self.assertIn('--restart-keys "$RESTART_KEYS"', job)
+        self.assertIn("${RESTART_MESSAGE}", job)
 
 
 if __name__ == "__main__":

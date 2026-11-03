@@ -17,10 +17,12 @@ Because runner-health can run every 30 min, its Telegram alert is deduplicated
 changes (another runner goes offline, another host fails its disk check, a new stale
 run, a scheduler finding), every 6 h while unchanged ("REPEAT"), and once more as
 "RESOLVED - fleet healthy" when everything clears. Auto-restart only notifies a restart that brought the runner back online; a
-runner that stays offline is the monitor's CRITICAL. A **Run workflow** with
+runner that stays offline is the monitor's CRITICAL. If the auto-restart itself keeps failing, the monitor raises a separate
+`restart-path-failing:<runner>` condition (it reads this repo's failed runner-restart runs, `ops/restart_liveness.py`; OPS-48):
+the CRITICAL's "Auto-restart firing" is not a promise that the restart works. A **Run workflow** with
 `test_alert` always sends. A manual restart dispatch notifies every outcome, including
 a failed one (OPS-47): the message says whether the restart command failed and whether
-the runner is online anyway.
+the runner is online anyway. A cancelled dispatch notifies nothing (OPS-48 (a)).
 
 Disk alerts are per host (OPS-45): the alert job reads which `check-disk (<host>)` legs
 failed, and at which step, from the run's jobs API, and names the hosts by cause:
@@ -38,6 +40,7 @@ fleet host" (key `disk`) and a log warning: open the run's check-disk legs to se
 | Symptom | Action |
 |---|---|
 | Runner shows offline | Auto-restart fires on every monitor run (cadence above); force it: run **Restart Self-Hosted Runner** with the runner's name + unit, or `systemctl restart <unit>` on the host |
+| Alert: "restart path failing ... for \<runner\>" | The auto-restart workflow itself is failing for that runner (bad unit name, SSH broken, unit that will not start): check the linked restart run's logs, and SSH its host (fleet/inventory.yml) if the runner is still offline — it will not self-heal (OPS-48) |
 | Alert: "Disk over threshold on: <host>" | `docker system prune` / `builder prune` on that host (**Disk** below) |
 | Alert: "SSH unreachable ... disk not checked, on: <host>" | The monitor could not log in (host down, `<PREFIX>_VPS_*` secrets missing or wrong, or `df` unreadable). The leg's Probe step has the `::error::`. If that host's runners are offline too, the box is down |
 | Alert: "HOST KEY MISMATCH ... on: <host>" | Nothing was run on the host. See **Host key changed** below; don't re-pin blindly |

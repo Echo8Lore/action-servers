@@ -10,7 +10,9 @@ name: Restart Self-Hosted Runner
 #   - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (optional; outcome notification via
 #     ops/notify-telegram.sh, fetched from Echo8Lore/action-servers at job.workflow_sha).
 #     Called from runner-health (quiet_unless_online), only "verified online" notifies.
-#     Manual dispatches notify every outcome, including a failed restart (OPS-47).
+#     Manual dispatches notify every outcome, including a failed restart (OPS-47);
+#     a cancelled dispatch notifies nothing (the steps below run !cancelled(),
+#     OPS-48 (a)).
 #
 # Multi-host: the host is chosen by ssh_secret_prefix (the host's value in
 # fleet/inventory.yml), resolved via secrets[format(...)].
@@ -73,6 +75,12 @@ permissions:
 
 jobs:
   restart-runner:
+    # The target runner in the job name (OPS-48): it is the only API-visible
+    # place a runner-restart run says what it was about -- the run's own name
+    # and the jobs' runner_name field (GitHub-hosted here) say nothing.
+    # runner-health maps this repo's failed runner-restart runs back to their
+    # runner through the jobs API (ops/restart_liveness.py).
+    name: restart-runner (${{ inputs.runner_name }})
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -155,10 +163,13 @@ jobs:
           fi
 
       - name: Verify runner is online
-        # always(): even a failed restart command can leave the runner online (the
-        # remote script may have run partway, or the runner was never down). This
-        # step is the ground truth; the notification (OPS-47) reports both facts.
-        if: always()
+        # !cancelled(), not always() (OPS-48 (a)): even a failed restart command
+        # can leave the runner online (the remote script may have run partway, or
+        # the runner was never down) -- this step is the ground truth and the
+        # notification (OPS-47) reports both facts. But a CANCELLED run skips it:
+        # nothing ran on the host, so there is nothing to verify, nothing to
+        # page, and no 60 s of retries burned after the dispatch is already dead.
+        if: ${{ !cancelled() }}
         id: verify
         env:
           GH_TOKEN: ${{ secrets.RUNNER_HEALTH_PAT }}
@@ -172,8 +183,14 @@ jobs:
           fi
           sleep 10
           for i in 1 2 3 4 5; do
-            STATUS=$(gh api --paginate "$RUNNERS_API" \
-              --jq ".runners[] | select(.name == \"$TARGET_RUNNER\") | .status" 2>/dev/null || true)
+            # --arg (OPS-48 (d)): TARGET_RUNNER goes in as DATA, never into the
+            # jq filter string -- interpolated there it was a jq-filter injection
+            # for anyone with dispatch rights, which could distort the online
+            # verdict. gh api --paginate emits one JSON doc per page; jq folds
+            # them all.
+            STATUS=$(gh api --paginate "$RUNNERS_API" 2>/dev/null \
+                     | jq -r --arg target "$TARGET_RUNNER" \
+                          '.runners[]? | select(.name == $target) | .status' || true)
             if [ "$STATUS" = "online" ]; then
               echo "Runner $TARGET_RUNNER is back online."
               echo "online=true" >> "$GITHUB_OUTPUT"
@@ -185,7 +202,7 @@ jobs:
           echo "::warning::Runner $TARGET_RUNNER not confirmed online after restart (may still be recovering)."
 
       - uses: actions/checkout@v5
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         with:
           # Public repo, fixed location: works whichever repo calls this workflow. Same
@@ -197,9 +214,12 @@ jobs:
 
       # Runs on every outcome (OPS-47): a restart whose SSH step fails must still
       # page a manual dispatch. Only claims "verified online" when the verify step
-      # actually saw it online; a failed restart command is never reported as one.
+      # actually saw it online AND the restart step succeeded; anything else
+      # (failure, or a skipped restart step because the first checkout failed)
+      # is reported as "did not succeed", never as a verified restart (OPS-48 (b)).
+      # A cancelled dispatch pages nothing (!cancelled(), OPS-48 (a)).
       - name: Telegram notification
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -214,17 +234,16 @@ jobs:
             echo "Not confirmed online; no notice (runner-health's alert covers it)."
             exit 0
           fi
-          if [ "$ONLINE" = "true" ]; then
-            if [ "$RESTART" = "failure" ]; then
-              MSG="Self-hosted runner ${TARGET_RUNNER}: restart command FAILED, but the runner is verified ONLINE."
-            else
-              MSG="Self-hosted runner ${TARGET_RUNNER} restarted and verified online."
-            fi
+          # RESTART = success, not != failure (OPS-48 (b)): a SKIPPED restart step
+          # (the fleet checkout failed; nothing ran on the host) must never claim
+          # "restarted and verified online".
+          if [ "$ONLINE" = "true" ] && [ "$RESTART" = "success" ]; then
+            MSG="Self-hosted runner ${TARGET_RUNNER} restarted and verified online."
+          elif [ "$ONLINE" = "true" ]; then
+            MSG="Self-hosted runner ${TARGET_RUNNER}: restart did not succeed (outcome: ${RESTART}), but the runner is verified ONLINE."
+          elif [ "$RESTART" = "success" ]; then
+            MSG="Self-hosted runner ${TARGET_RUNNER} restart sent, but it was NOT confirmed online."
           else
-            if [ "$RESTART" = "failure" ]; then
-              MSG="Self-hosted runner ${TARGET_RUNNER}: restart command FAILED and the runner is NOT online."
-            else
-              MSG="Self-hosted runner ${TARGET_RUNNER} restart sent, but it was NOT confirmed online."
-            fi
+            MSG="Self-hosted runner ${TARGET_RUNNER}: restart did not succeed (outcome: ${RESTART}) and the runner is NOT online."
           fi
           printf '%s\n%s\n' "$MSG" "$RUN_URL" | bash ops/notify-telegram.sh || true
