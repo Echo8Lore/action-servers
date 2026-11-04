@@ -76,10 +76,12 @@ permissions:
 jobs:
   restart-runner:
     # The target runner in the job name (OPS-48): it is the only API-visible
-    # place a runner-restart run says what it was about -- the run's own name
-    # and the jobs' runner_name field (GitHub-hosted here) say nothing.
-    # runner-health maps this repo's failed runner-restart runs back to their
-    # runner through the jobs API (ops/restart_liveness.py).
+    # place a restart says what it was about -- a run's own name and the jobs'
+    # runner_name field (GitHub-hosted) say nothing. Inside runner-health's own
+    # runs (where the auto-restart calls this workflow) the jobs API renders it
+    # as `auto-restart (...) / restart-runner (<target>)`, and
+    # ops/restart_liveness.py finds failed auto-restarts through exactly that
+    # name. A pre-name job renders as `... / restart-runner` and maps to '?'.
     name: restart-runner (${{ inputs.runner_name }})
     runs-on: ubuntu-latest
     timeout-minutes: 5

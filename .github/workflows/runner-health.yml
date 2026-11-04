@@ -366,7 +366,8 @@ jobs:
           SCHEDULER_MESSAGE: ${{ needs.check-scheduler.outputs.message }}
           SCHEDULER_KEYS: ${{ needs.check-scheduler.outputs.keys }}
           # "No condition" only means "healthy" when the checks really ran: a failed
-          # check job must not produce a RESOLVED.
+          # check job -- or a restart-path check that could not complete (the
+          # INCOMPLETE=true below) -- must not produce a RESOLVED.
           INCOMPLETE: ${{ needs.check-runners.result != 'success' || needs.check-stale-jobs.result != 'success' || needs.check-scheduler.result == 'failure' || needs.check-scheduler.result == 'cancelled' || (needs.check-disk.result != 'success' && needs.check-disk.result != 'failure') }}
         run: |
           # Plain text. The facts are runner names, inventory host ids, counts and
@@ -387,21 +388,32 @@ jobs:
             fi
           fi
 
-          # Did the auto-restart path itself fail? (OPS-48) auto-restart below fires
-          # runner-restart (quiet mode) for every offline runner, and a restart path
-          # that keeps failing would surface only as the OFFLINE CRITICAL repeating
-          # every 6 h. The helper lists this repo's recent failed runner-restart runs
-          # with GITHUB_TOKEN (actions: read above), counts only runs the
-          # auto-restart itself fired (event workflow_call -- manual dispatches page
-          # on their own, OPS-47), and maps each to its runner via the run's jobs
-          # (the restart job's name carries the target). It never fails this job:
-          # an API error or a helper crash warns and alerts nothing (no message
-          # file -> no lines; no keys file -> no restart keys).
+          # Did the auto-restart path itself fail? (OPS-48) auto-restart below
+          # calls runner-restart (quiet mode) for every offline runner, and a
+          # restart path that keeps failing would surface only as the OFFLINE
+          # CRITICAL repeating every 6 h. Those restarts are JOBS inside this
+          # workflow's own runs (a local reusable-workflow call creates no run
+          # of runner-restart.yml), so the helper lists this repo's recent
+          # runner-health runs, reads their jobs and counts the failed
+          # auto-restart legs -- `auto-restart (...) / restart-runner
+          # (<runner>)` -- with GITHUB_TOKEN (actions: read above). It never
+          # fails this job: an API error or a helper crash warns, and its
+          # --incomplete marker then makes the dedupe keep its state instead
+          # of sending a false "RESOLVED" (the findings that could be read
+          # still page).
           RESTART_MSG="$RUNNER_TEMP/restart.txt"
           RESTART_KEYS="$RUNNER_TEMP/restart-keys.txt"
+          RESTART_INCOMPLETE="$RUNNER_TEMP/restart-incomplete.txt"
           python3 ops/restart_liveness.py check \
             --repo "$GITHUB_REPOSITORY" --message "$RESTART_MSG" --keys "$RESTART_KEYS" \
+            --incomplete "$RESTART_INCOMPLETE" \
             || echo "::warning::restart liveness helper failed; restart-path not checked"
+          # Missing marker or "true" = the restart path was not fully checked
+          # this run: "no restart keys" then means "not checked", never "cleared".
+          if [ ! -f "$RESTART_INCOMPLETE" ] || grep -qx true "$RESTART_INCOMPLETE"; then
+            echo "::warning::restart-path check incomplete; suppressing any RESOLVED this run."
+            INCOMPLETE=true
+          fi
           RESTART_MESSAGE=$(cat "$RESTART_MSG" 2>/dev/null || true)
 
           if [ "$ANY_OFFLINE" = "true" ]; then
@@ -497,6 +509,8 @@ jobs:
       # A failed restart is already this run's CRITICAL (deduplicated above); only the
       # state change "restarted and verified online" pages from the restart itself. A
       # restart path that keeps failing pages restart-path-failing:<runner> from the
-      # next monitor run (ops/restart_liveness.py, OPS-48).
+      # monitor's alert -- this run's when the leg has already failed by the time the
+      # alert job checks, otherwise the next monitor run (ops/restart_liveness.py,
+      # OPS-48).
       quiet_unless_online: true
     secrets: inherit

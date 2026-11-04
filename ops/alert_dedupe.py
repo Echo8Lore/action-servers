@@ -27,8 +27,8 @@ counts and timestamps in the message don't re-page:
   scheduler:<level>:<workflow>:<quiet slots>      from dispatch_liveness.py --keys (the
                                                   h/e counts are not part of it)
   restart-path-failing:<runner>                  the auto-restart path is broken:
-                                                  recent runner-restart runs for that
-                                                  runner failed (restart_liveness.py)
+                                                  failed auto-restart legs in recent
+                                                  runner-health runs (restart_liveness.py)
 
 Decision:
   keys, fingerprint changed (or never paged)   -> send the message; state = {fp, now}
@@ -37,7 +37,8 @@ Decision:
   no keys, last page had a fingerprint         -> send one "RESOLVED - fleet healthy";
                                                   state cleared
   no keys, nothing paged                       -> nothing
-  --incomplete (a check job failed, so "no keys" may just mean "not checked")
+  --incomplete (a check job failed, or the restart-path check could not run,
+                                               so "no keys" may just mean "not checked")
                                                -> never RESOLVED; state kept
   --test-alert                                 -> a message with keys is sent regardless
                                                   (the run's purpose is to prove paging)
