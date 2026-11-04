@@ -24,10 +24,11 @@ What they pin:
      interpolated into the filter string: that was a jq-filter injection for
      anyone with dispatch rights, able to distort the online verdict (OPS-48
      (d)).
-  5. The job's name carries the target runner: it is the only API-visible
-     place a run says what it was about, and runner-health maps this repo's
-     failed runner-restart runs back to their runner through it
-     (ops/restart_liveness.py, OPS-48).
+  5. The job's name carries the target runner: inside runner-health's own
+     runs the called job renders as `auto-restart (...) / restart-runner
+     (<target>)` -- the only API-visible place a restart says what it was
+     about -- and ops/restart_liveness.py finds failed auto-restarts through
+     exactly that name (OPS-48).
 
 Nothing here touches the network or any secret.
 """
@@ -160,9 +161,10 @@ class RunnerRestartNotify(unittest.TestCase):
         self.assertNotIn('select(.name == \\"$TARGET_RUNNER\\"', body)
 
     def test_job_name_carries_the_target_runner(self):
-        # OPS-48: the job's name is the only API-visible place a run says which
-        # runner it targeted; ops/restart_liveness.py maps failed runs to their
-        # runners through it (the jobs API).
+        # OPS-48: the job's name is the only API-visible place a restart says
+        # which runner it targeted (inside runner-health's runs, as the
+        # `... / restart-runner (<target>)` composite); ops/restart_liveness.py
+        # maps failed auto-restart legs to their runners through it.
         self.assertIn("name: restart-runner (${{ inputs.runner_name }})",
                       WORKFLOW.read_text())
 
