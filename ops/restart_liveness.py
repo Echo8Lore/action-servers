@@ -23,7 +23,11 @@ helper therefore lists this repo's recent runner-health runs and reads each
 run's jobs, and counts the failed legs of the auto-restart job. Their names are
 `auto-restart (...) / restart-runner (<runner>)`: the jobs API renders a called
 job as `<caller job leg> / <called job name>`, and the called job's name
-carries the target (runner-restart.yml, OPS-48). A leg of the pre-name shape
+carries the target (runner-restart.yml, OPS-48). Only the
+` / restart-runner (<runner>)` suffix is matched -- the caller leg's own name
+is never required -- so a `name:` later added to the auto-restart job cannot
+silently break detection (OPS-106 R1: the match used to require the composite
+to start with 'auto-restart'). A leg of the pre-name shape
 (`... / restart-runner`, job id only) cannot say its runner and maps to `?`,
 like offline:? -- that is stable: the name never changes while the run sits in
 the window. No event filter: every run of this workflow is a monitor run, and
@@ -71,7 +75,10 @@ import urllib.request
 
 API = "https://api.github.com"
 WORKFLOW = "runner-health.yml"    # whose runs carry the auto-restart jobs
-CALLER_JOB = "auto-restart"       # runner-health.yml's job that calls runner-restart.yml
+CALLER_JOB = "auto-restart"       # runner-health.yml's job that calls runner-restart.yml.
+                                  # Documentation + test pin only: the match is on the
+                                  # called-job suffix, so a name:/rename here cannot
+                                  # break detection (OPS-106 R1)
 CALLED_JOB = "restart-runner"     # runner-restart.yml's job; its name carries the target
 JOB_SEP = " / "                   # how the jobs API renders a called job: <caller> / <called>
 # A restart leg that timed out is as broken as one that failed: either way the
@@ -151,12 +158,15 @@ def run_jobs(api, repo, run_id):
 
 def restart_target(name):
     """A job name from a runner-health run -> (is auto-restart leg, target or
-    None). The called part is matched LAST (`rfind`): the composite always ends
-    with it, and nothing in the caller-side rendering can shadow it. `?` legs
-    (called job without the target-carrying name) return (True, None)."""
+    None). Matched on the ` / restart-runner (...)` suffix ALONE (`rfind`: the
+    composite always ends with the called job, and nothing in the caller-side
+    rendering can shadow it): the caller leg's name is never required, so a
+    `name:` added to the auto-restart job cannot silently break detection
+    (OPS-106 R1). `?` legs (called job without the target-carrying name)
+    return (True, None)."""
     name = (name or "").strip()
     i = name.rfind(f"{JOB_SEP}{CALLED_JOB}")
-    if i < 0 or not name.startswith(CALLER_JOB):
+    if i < 0:
         return False, None
     rest = name[i + len(JOB_SEP) + len(CALLED_JOB):].strip()
     if rest.startswith("(") and rest.endswith(")") and rest[1:-1].strip():

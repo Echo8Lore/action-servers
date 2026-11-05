@@ -80,8 +80,10 @@ jobs:
     # runner_name field (GitHub-hosted) say nothing. Inside runner-health's own
     # runs (where the auto-restart calls this workflow) the jobs API renders it
     # as `auto-restart (...) / restart-runner (<target>)`, and
-    # ops/restart_liveness.py finds failed auto-restarts through exactly that
-    # name. A pre-name job renders as `... / restart-runner` and maps to '?'.
+    # ops/restart_liveness.py finds failed auto-restarts through the
+    # ` / restart-runner (<target>)` suffix of that name alone, whatever the
+    # caller leg is called (OPS-106 R1). A pre-name job renders as
+    # `... / restart-runner` and maps to '?'.
     name: restart-runner (${{ inputs.runner_name }})
     runs-on: ubuntu-latest
     timeout-minutes: 5

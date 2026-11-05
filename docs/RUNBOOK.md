@@ -20,7 +20,9 @@ run, a scheduler finding), every 6 h while unchanged ("REPEAT"), and once more a
 runner that stays offline is the monitor's CRITICAL. If the auto-restart itself keeps failing, the monitor raises a separate
 `restart-path-failing:<runner>` condition (it reads the failed `auto-restart ... / restart-runner (<runner>)` jobs inside this
 repo's recent runner-health runs, `ops/restart_liveness.py`; OPS-48):
-the CRITICAL's "Auto-restart firing" is not a promise that the restart works. A **Run workflow** with
+the CRITICAL's "Auto-restart firing" is not a promise that the restart works. A GitHub API
+blip during that check re-pages nothing: while it is incomplete the dedupe carries the
+restart keys it last saw forward (OPS-106). A **Run workflow** with
 `test_alert` always sends. A manual restart dispatch notifies every outcome, including
 a failed one (OPS-47): the message says whether the restart command failed and whether
 the runner is online anyway. A cancelled dispatch notifies nothing (OPS-48 (a)).
