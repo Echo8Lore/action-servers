@@ -9,12 +9,15 @@ job level, and a reusable workflow called that way creates no
 runner-restart.yml run (the first round of PR #24 looked for workflow_call
 runs that do not exist, so its alert could never fire). A failed
 `auto-restart (...) / restart-runner (<runner>)` leg raises exactly one deduped
-CRITICAL restart-path-failing:<runner> condition; healthy, skipped, cancelled
-and non-restart jobs never count, and neither does the run's own conclusion
-matter; a jobs-API error marks the check incomplete instead of flapping a '?'
-key (no false RESOLVED, no double pages); a leg whose name cannot say its
-runner (pre-name era) falls back to restart-path-failing:? like offline:?;
-counts and URLs stay out of the keys.
+CRITICAL restart-path-failing:<runner> condition; the match is on the
+` / restart-runner (<runner>)` suffix ALONE, so a `name:` added to the
+auto-restart job cannot silently break detection (OPS-106 R1 -- the old
+matcher required the composite to start with 'auto-restart'); healthy,
+skipped, cancelled and non-restart jobs never count, and neither does the
+run's own conclusion matter; a jobs-API error marks the check incomplete
+instead of flapping a '?' key (no false RESOLVED, no double pages); a leg
+whose name cannot say its runner (pre-name era) falls back to
+restart-path-failing:? like offline:?; counts and URLs stay out of the keys.
 
 Fixtures are trimmed copies of REAL API payloads, fetched read-only with
 gh api on 2026-11-04:
@@ -284,6 +287,22 @@ class RestartTarget(unittest.TestCase):
                            (f"auto-restart ({{'name': 'z'}}) / restart-runner (z)", (True, "z"))):
             self.assertEqual(rl.restart_target(name), want, name)
 
+    def test_a_name_on_the_caller_job_cannot_break_the_match(self):
+        # OPS-106 R1: the match is on the ` / restart-runner (<target>)` suffix
+        # alone. If runner-health's auto-restart job ever gains a `name:` (or is
+        # renamed), only the caller half of the composite changes -- the failed
+        # leg must still be found. The old matcher required the name to start
+        # with 'auto-restart', which exactly such an edit would silently break.
+        # (The caller half is never empty in a real composite: the jobs API
+        # renders `<caller leg> / <called job name>` and a job always has a
+        # name, so no empty-caller case is pinned here.)
+        for caller in (CALLER_LEG,
+                       "restart it now ({'name': 'r1', 'unit': 'u.service', "
+                       "'prefix': 'DEVOPS', 'api': 'orgs/Echo8Lore/actions/runners'})",
+                       "banana (weird)"):
+            self.assertEqual(rl.restart_target(f"{caller} / restart-runner (org-runner-01)"),
+                             (True, "org-runner-01"), caller)
+
     def test_pre_name_leg_is_unmappable(self):
         # The real called job name before OPS-48 (verbatim from dispatch run
         # 36364769843's job): an auto-restart leg that cannot say its runner.
@@ -302,9 +321,11 @@ class RestartTarget(unittest.TestCase):
             self.assertEqual(rl.restart_target(name), (False, None), name)
 
     def test_matches_the_workflow_jobs(self):
-        # The extractor and the workflows must agree: the caller job is
-        # runner-health.yml's auto-restart, the called job is
-        # runner-restart.yml's restart-runner, whose name carries the target.
+        # The workflows and the composite's rendering must agree. The CALLED
+        # half is what the matcher needs: runner-restart.yml's restart-runner,
+        # whose name carries the target -- that pin is detection-critical. The
+        # caller half (auto-restart) is documentation: since OPS-106 R1 the
+        # matcher never looks at it, so this pin cannot silently go stale.
         health = RUNNER_HEALTH.read_text()
         restart = RUNNER_RESTART.read_text()
         self.assertIn(f"  {rl.CALLER_JOB}:\n", health)
@@ -336,6 +357,18 @@ class Check(unittest.TestCase):
         self.assertIn("Action:", text)
         self.assertIn(RUNS_Q, api.fetched)
         self.assertIn(jobs_q(1), api.fetched)
+
+    def test_failed_leg_with_a_renamed_caller_leg_still_pages(self):
+        # OPS-106 R1 end to end: a `name:` on the auto-restart job (or a rename
+        # of it) changes only the caller half of every composite -- the failed
+        # leg is still found, still maps to its runner, and the check still
+        # completes.
+        api = Stub({RUNS_Q: {"workflow_runs": [run(1)]},
+                    jobs_q(1): {"jobs": [dict(failed_leg(),
+                                             name="custom restart leg (x) / restart-runner (org-runner-01)")]}})
+        out, complete, _ = self.check(api)
+        self.assertEqual([k for _, k in out], ["restart-path-failing:org-runner-01"])
+        self.assertTrue(complete)
 
     def test_real_healthy_payload_pages_nothing(self):
         # The unmodified real jobs payload of run 41826084192: no finding, and

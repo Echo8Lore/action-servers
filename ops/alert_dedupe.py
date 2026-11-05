@@ -31,7 +31,8 @@ counts and timestamps in the message don't re-page:
                                                   runner-health runs (restart_liveness.py)
 
 Decision:
-  keys, fingerprint changed (or never paged)   -> send the message; state = {fp, now}
+  keys, fingerprint changed (or never paged)   -> send the message; state = {fp,
+                                                  now, the restart keys seen}
   keys, same fingerprint, >= --repeat-min old  -> send it again, marked REPEAT
   keys, same fingerprint, younger              -> suppress; state unchanged
   no keys, last page had a fingerprint         -> send one "RESOLVED - fleet healthy";
@@ -39,7 +40,17 @@ Decision:
   no keys, nothing paged                       -> nothing
   --incomplete (a check job failed, or the restart-path check could not run,
                                                so "no keys" may just mean "not checked")
-                                               -> never RESOLVED; state kept
+                                               -> never RESOLVED; state kept; and the
+                                                  restart keys of the last page are
+                                                  carried forward (union with whatever
+                                                  the check could still read), so a
+                                                  liveness-API blip cannot drop
+                                                  restart-path-failing:<runner> from the
+                                                  fingerprint -- no page when the key
+                                                  drops out, none when it returns
+                                                  (OPS-106 R2; INCOMPLETE alone only
+                                                  blocked the false RESOLVED, and a
+                                                  blip cost up to 2 extra pages)
   --test-alert                                 -> a message with keys is sent regardless
                                                   (the run's purpose is to prove paging)
 
@@ -87,6 +98,9 @@ DISK_FALLBACK = ("HIGH - Disk over threshold (or SSH unreachable, or host key mi
                  "on a fleet host - see the check-disk legs of this run")
 LEG_NAME = re.compile(r"^check-disk \((.+)\)$")
 RESOLVED = "RESOLVED - fleet healthy: every condition from the last page has cleared."
+# The only condition keys the dedupe REMEMBERS between runs (in the state), so
+# an incomplete restart-path check can carry them forward (OPS-106 R2).
+RESTART_KEY_PREFIX = "restart-path-failing:"
 
 
 def now_utc():
@@ -172,7 +186,7 @@ def condition_keys(any_offline="", offline_runners="", disk="", stale_count="",
     # runner whose auto-restart failed (OPS-48); like scheduler keys, they arrive
     # already key-shaped, and anything else in the file is ignored.
     for ln in (restart_keys or "").splitlines():
-        if ln.strip().startswith("restart-path-failing:"):
+        if ln.strip().startswith(RESTART_KEY_PREFIX):
             keys.add(ln.strip())
     return sorted(keys)
 
@@ -182,36 +196,79 @@ def fingerprint(keys):
 
 
 def normalize_state(raw):
+    """-> {"fingerprint", "paged_at", "restart_keys"}. The restart keys are the
+    restart-path-failing:* keys of the last page -- the only keys remembered
+    between runs, so an incomplete restart check can carry them forward
+    (OPS-106 R2). States written before OPS-106 have no such field: nothing is
+    carried, which can cost the old blip behavior exactly once."""
     if not isinstance(raw, dict):
-        return {"fingerprint": "", "paged_at": None}
+        return {"fingerprint": "", "paged_at": None, "restart_keys": []}
     fp = raw.get("fingerprint") if isinstance(raw.get("fingerprint"), str) else ""
     paged = raw.get("paged_at")
     try:
         dt.datetime.fromisoformat(str(paged).replace("Z", "+00:00"))
     except ValueError:
         paged = None
-    return {"fingerprint": fp, "paged_at": paged if fp else None}
+    rk = raw.get("restart_keys")
+    if not isinstance(rk, list):
+        rk = []
+    # Only well-formed restart keys are carried: no junk, no other condition's
+    # keys smuggled into the carried set.
+    rk = sorted({k for k in rk
+                 if isinstance(k, str) and k.startswith(RESTART_KEY_PREFIX)})
+    return {"fingerprint": fp, "paged_at": paged if fp else None,
+            "restart_keys": rk if fp else []}
+
+
+def carry_restart_keys(keys, prev, incomplete):
+    """-> (keys, restart keys in them) with the previous restart keys carried
+    forward while the restart-path check is incomplete (OPS-106 R2).
+
+    A liveness-API blip used to drop restart-path-failing:<runner> from the
+    key set, change the fingerprint and page -- then page again when the key
+    returned: up to 2 extra pages per blip. While incomplete, the keys of the
+    last page are unioned with whatever the check could still read: a blip
+    changes nothing (no page), a genuinely NEW failed leg still pages (its
+    key is no subset of the carried set), and a healed path stops carrying
+    its key at the first COMPLETE check."""
+    cur = {k for k in keys if k.startswith(RESTART_KEY_PREFIX)}
+    if not incomplete:
+        return keys, cur
+    carried = cur | set(prev)
+    if carried != cur:
+        keys = sorted((set(keys) - cur) | carried)
+    return keys, carried
 
 
 def decide(state, keys, message, now, run_url="", repeat_min=REPEAT_MIN,
            test_alert=False, incomplete=False):
     """-> (action, text to send or "", new state). action is one of
-    page | repeat | suppress | resolved | none."""
+    page | repeat | suppress | resolved | none.
+
+    While the restart-path check is incomplete, the restart keys it last saw
+    are carried forward (carry_restart_keys, OPS-106 R2), so a liveness-API
+    blip cannot drop restart-path-failing:<runner> from the fingerprint;
+    INCOMPLETE still only ever blocks RESOLVED. Every state written here
+    records the restart keys it was decided on, so the next incomplete run
+    carries them forward again."""
     state = normalize_state(state)
+    keys, eff_restart = carry_restart_keys(keys, state["restart_keys"], incomplete)
     fp = fingerprint(keys)
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     if fp:
         if test_alert or fp != state["fingerprint"] or not state["paged_at"]:
-            return "page", message, {"fingerprint": fp, "paged_at": stamp}
+            return "page", message, {"fingerprint": fp, "paged_at": stamp,
+                                     "restart_keys": sorted(eff_restart)}
         paged = dt.datetime.fromisoformat(state["paged_at"].replace("Z", "+00:00"))
         if now - paged >= dt.timedelta(minutes=repeat_min):
             hours = int((now - paged).total_seconds() // 3600)
             return ("repeat", f"REPEAT - unchanged for {hours} h, still unresolved\n\n{message}",
-                    {"fingerprint": fp, "paged_at": stamp})
+                    {"fingerprint": fp, "paged_at": stamp,
+                     "restart_keys": sorted(eff_restart)})
         return "suppress", "", state
     if state["fingerprint"] and not incomplete:
         text = f"Runner Health Monitor\n\n{RESOLVED}\n" + (f"{run_url}\n" if run_url else "")
-        return "resolved", text, {"fingerprint": "", "paged_at": None}
+        return "resolved", text, {"fingerprint": "", "paged_at": None, "restart_keys": []}
     return "none", "", state
 
 
@@ -268,13 +325,17 @@ def main(argv=None):
                           a.stale_summary, a.scheduler_keys,
                           parse_disk_legs(read_optional(a.disk_legs)),
                           restart_keys=read_optional(a.restart_keys) or "")
+    inc = truthy(a.incomplete)
+    # The same carry decide() applies: the logged count is what was really
+    # fingerprinted (carried restart keys included), not the raw file's take.
+    eff_keys, _ = carry_restart_keys(keys, normalize_state(state)["restart_keys"], inc)
     action, text, new_state = decide(state, keys, message, now_utc(), a.run_url,
-                                     a.repeat_min, truthy(a.test_alert), truthy(a.incomplete))
+                                     a.repeat_min, truthy(a.test_alert), inc)
     pathlib.Path(a.out).write_text(text)
     pathlib.Path(a.new_state).write_text(json.dumps(new_state, sort_keys=True))
     # Keys can hold runner names, host ids and stale-run names; all already appear in
     # this log.
-    print(f"alert dedupe: {action} ({len(keys)} condition key(s))")
+    print(f"alert dedupe: {action} ({len(eff_keys)} condition key(s))")
     return 0
 
 

@@ -9,8 +9,11 @@ Cases: first page; same condition within 6 h suppressed; condition changed pages
 exits 0); keys ignore prose and counts; per-host disk keys from the jobs API legs
 (OPS-45), a second host crossing pages at once, API failure falls back to one "disk" key;
 restart-path-failing:<runner> keys from ops/restart_liveness.py (OPS-48) page, dedupe
-and clear like any other condition -- and a restart-path check that could not run
-(incomplete) never ends in a false RESOLVED (PR #24 rework).
+and clear like any other condition -- a restart-path check that could not run
+(incomplete) never ends in a false RESOLVED (PR #24 rework), and while it is incomplete
+the restart keys of the last page are carried forward, so a liveness-API blip neither
+drops a restart-path-failing key from the fingerprint nor re-pages when the key returns
+(OPS-106 R2: the blip used to cost up to 2 extra pages).
 """
 
 import datetime as dt
@@ -156,7 +159,8 @@ class Decide(unittest.TestCase):
         self.assertEqual(action, "page")
         self.assertEqual(text, MSG)
         self.assertEqual(st, {"fingerprint": ad.fingerprint(self.KEYS),
-                              "paged_at": "2026-09-27T12:00:00Z"})
+                              "paged_at": "2026-09-27T12:00:00Z",
+                              "restart_keys": []})   # OPS-106 R2: states record the restart keys
 
     def test_same_condition_within_6h_suppressed(self):
         _, _, st = self.first()
@@ -191,7 +195,7 @@ class Decide(unittest.TestCase):
         self.assertEqual(action, "resolved")
         self.assertIn("RESOLVED - fleet healthy", text)
         self.assertIn("https://x/run/1", text)
-        self.assertEqual(st2, {"fingerprint": "", "paged_at": None})
+        self.assertEqual(st2, {"fingerprint": "", "paged_at": None, "restart_keys": []})
         self.assertEqual(ad.decide(st2, [], "", later(60))[:2], ("none", ""))
 
     def test_incomplete_never_resolves(self):
@@ -223,12 +227,88 @@ class Decide(unittest.TestCase):
         # its keys vanish for that run -- with --incomplete the dedupe must
         # keep the state (no false "RESOLVED"), and once the check can see
         # again, the still-live condition stays deduped (no extra page).
+        # OPS-106 R2 moved the blip's action from "none" to "suppress" (the
+        # carried key keeps the fingerprint non-empty and unchanged) -- the
+        # user-visible outcome is the same: nothing sent, state kept.
         keys = ["restart-path-failing:r1"]
         _, _, st = ad.decide({}, keys, "m", T0)
         action, text, st2 = ad.decide(st, [], "", later(30), incomplete=True)
-        self.assertEqual((action, text), ("none", ""))
+        self.assertEqual((action, text), ("suppress", ""))
         self.assertEqual(st2, st)
         self.assertEqual(ad.decide(st, keys, "m", later(60))[0], "suppress")
+
+    def test_incomplete_blip_does_not_lose_the_restart_key(self):
+        # OPS-106 R2, the acceptance case: the runs API fails while a
+        # restart-path-failing key is live -- and the runner's own offline key
+        # is live beside it (that is the realistic shape: a runner whose
+        # restart keeps failing IS offline). The restart keys of the last page
+        # are carried forward, the fingerprint does not change, and no page is
+        # sent -- neither when the API blips nor when the key returns.
+        # (Without the carry, both moves changed the fingerprint and paged:
+        # up to 2 extra pages per blip.)
+        keys = ["offline:r1", "restart-path-failing:r1"]
+        action, _, st = ad.decide({}, keys, "m", T0)
+        self.assertEqual(action, "page")
+        blipped = ["offline:r1"]                  # the runs API failed: no restart keys
+        action, text, st2 = ad.decide(st, blipped, "m2", later(30), incomplete=True)
+        self.assertEqual((action, text), ("suppress", ""))   # the OLD code paged here
+        self.assertEqual(st2, st)
+        # The check sees the failed leg again: still no page.
+        action, _, _ = ad.decide(st, keys, "m3", later(60))
+        self.assertEqual(action, "suppress")
+
+    def test_jobs_api_blip_on_one_run_keeps_that_runners_key(self):
+        # The jobs API failed on ONE run (the check is incomplete), so the
+        # helper could list only the other runner's failed legs: the
+        # unreadable runner's key is carried forward from the state and the
+        # fingerprint does not change -- the readable key stays deduped too.
+        keys = ["restart-path-failing:r-alpha", "restart-path-failing:r-beta"]
+        _, _, st = ad.decide({}, keys, "m", T0)
+        partial = ["restart-path-failing:r-beta"]   # r-alpha's run was not readable
+        action, text, st2 = ad.decide(st, partial, "m2", later(30), incomplete=True)
+        self.assertEqual((action, text), ("suppress", ""))
+        self.assertEqual(st2, st)
+
+    def test_incomplete_blip_still_pages_a_new_restart_failure(self):
+        # Carrying the previous keys forward must not hide a genuinely NEW
+        # failed leg that the blipped check could still read (OPS-48: the
+        # findings that could be read still page). The page's state records
+        # both keys, so the next blip carries both.
+        keys = ["offline:r1", "restart-path-failing:r1"]
+        _, _, st = ad.decide({}, keys, "m", T0)
+        grew = ["offline:r1", "restart-path-failing:r2"]
+        action, text, st2 = ad.decide(st, grew, "m2", later(30), incomplete=True)
+        self.assertEqual((action, text), ("page", "m2"))
+        self.assertEqual(st2["restart_keys"],
+                         ["restart-path-failing:r1", "restart-path-failing:r2"])
+        # And the carried pair survives the next blip.
+        action, _, _ = ad.decide(st2, ["offline:r1"], "m3", later(60), incomplete=True)
+        self.assertEqual(action, "suppress")
+
+    def test_healed_path_drops_its_key_on_the_first_complete_check(self):
+        # The carry must not cry forever: a restart path that healed while
+        # the API was down stops carrying its key as soon as one COMPLETE
+        # check sees it gone -- the condition set changed for real.
+        keys = ["restart-path-failing:r1"]
+        _, _, st = ad.decide({}, keys, "m", T0)
+        _, _, st = ad.decide(st, [], "", later(30), incomplete=True)   # blip: state kept
+        action, _, st2 = ad.decide(st, [], "", later(60))              # complete, clear
+        self.assertEqual(action, "resolved")
+        self.assertEqual(st2, {"fingerprint": "", "paged_at": None, "restart_keys": []})
+
+    def test_old_state_without_restart_keys_carries_nothing(self):
+        # A state written before OPS-106 (or a malformed restart_keys field)
+        # carries nothing: one transition blip can still cost the old
+        # behavior, exactly once -- and no junk or other condition's key can
+        # be smuggled into the carried set.
+        st = {"fingerprint": ad.fingerprint(["restart-path-failing:r1"]),
+              "paged_at": "2026-09-27T12:00:00Z"}
+        self.assertEqual(ad.normalize_state(st)["restart_keys"], [])
+        action, _, _ = ad.decide(st, [], "", later(30), incomplete=True)
+        self.assertEqual(action, "none")       # nothing to carry: old behavior
+        st["restart_keys"] = [5, None, "restart-path-failing:r1", "offline:r1"]
+        self.assertEqual(ad.normalize_state(st)["restart_keys"],
+                         ["restart-path-failing:r1"])
 
     def test_junk_state_is_a_first_page(self):
         for junk in (None, [], "x", {"fingerprint": 5}, {"fingerprint": "ab", "paged_at": "never"}):
@@ -291,12 +371,31 @@ class Main(unittest.TestCase):
         want = ad.fingerprint(["restart-path-failing:r1"])
         _, new, _ = self.run_main({}, restart_keys=str(d / "rk"))
         self.assertEqual(new["fingerprint"], want)
+        self.assertEqual(new["restart_keys"], ["restart-path-failing:r1"])
         # No file (the helper crashed before writing one): no restart keys.
         _, new, _ = self.run_main({}, restart_keys=str(d / "missing"))
         self.assertEqual(new["fingerprint"], "")
+        self.assertEqual(new["restart_keys"], [])
+
+    def test_incomplete_restart_blip_sends_nothing(self):
+        # OPS-106 R2, end to end through the CLI: a restart-path-failing key
+        # is live beside the offline runner's own key, and the runs API fails
+        # (empty --restart-keys file, --incomplete true). The carried key
+        # keeps the fingerprint unchanged: SEND stays empty (no page), the
+        # state is kept, and nothing resolves.
+        d = pathlib.Path(self.tmp.name)
+        (d / "rk").write_text("")
+        st = {"fingerprint": ad.fingerprint(["offline:r1", "restart-path-failing:r1"]),
+              "paged_at": "2026-09-27T11:30:00Z",
+              "restart_keys": ["restart-path-failing:r1"]}
+        out, new, _ = self.run_main(st, any_offline="true", offline_runners='["r1"]',
+                                    restart_keys=str(d / "rk"), incomplete="true")
+        self.assertEqual(out, "")
+        self.assertEqual(new, st)
 
     def test_suppressed_writes_empty_out(self):
-        st = {"fingerprint": ad.fingerprint(["offline:r1"]), "paged_at": "2026-09-27T11:30:00Z"}
+        st = {"fingerprint": ad.fingerprint(["offline:r1"]), "paged_at": "2026-09-27T11:30:00Z",
+              "restart_keys": []}
         out, new, _ = self.run_main(st, any_offline="true", offline_runners='["r1"]')
         self.assertEqual(out, "")
         self.assertEqual(new, st)

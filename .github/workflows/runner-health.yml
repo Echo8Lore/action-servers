@@ -321,12 +321,15 @@ jobs:
   # scheduler findings, restart-path-failing:<runner> per runner whose auto-restart
   # failed, OPS-48), not its prose.
   # It is sent when the fingerprint changes or is 6 h old, plus one "RESOLVED" when
-  # everything clears; test_alert bypasses it. State ({fingerprint, paged_at}) lives in
-  # the Actions cache like queue-watchdog's: saved under a new key each run, restored by
-  # prefix, and the new state adopted only after Telegram accepted the message, so a
-  # failed send pages again next run. If the cache is evicted, an ongoing incident pages
-  # once more: that errs toward paging. If the helper itself fails, the message is sent
-  # undeduplicated.
+  # everything clears; test_alert bypasses it. State ({fingerprint, paged_at,
+  # restart_keys}) lives in the Actions cache like queue-watchdog's: saved under a
+  # new key each run, restored by prefix, and the new state adopted only after
+  # Telegram accepted the message, so a failed send pages again next run. The
+  # remembered restart_keys are what an incomplete restart-path check carries
+  # forward, so a GitHub API blip drops no restart-path-failing key from the
+  # fingerprint (no re-page on the blip, none when it returns, OPS-106 R2). If
+  # the cache is evicted, an ongoing incident pages once more: that errs toward
+  # paging. If the helper itself fails, the message is sent undeduplicated.
   #
   # Per-host disk keys (OPS-45): needs.check-disk.result is one value for the whole
   # matrix, so the step lists the failed legs, and each one's failing step (= cause),
@@ -367,7 +370,10 @@ jobs:
           SCHEDULER_KEYS: ${{ needs.check-scheduler.outputs.keys }}
           # "No condition" only means "healthy" when the checks really ran: a failed
           # check job -- or a restart-path check that could not complete (the
-          # INCOMPLETE=true below) -- must not produce a RESOLVED.
+          # INCOMPLETE=true below) -- must not produce a RESOLVED, and while it is
+          # incomplete the dedupe carries the restart keys it last saw forward, so
+          # the blip drops no restart-path-failing key from the fingerprint
+          # (OPS-106 R2).
           INCOMPLETE: ${{ needs.check-runners.result != 'success' || needs.check-stale-jobs.result != 'success' || needs.check-scheduler.result == 'failure' || needs.check-scheduler.result == 'cancelled' || (needs.check-disk.result != 'success' && needs.check-disk.result != 'failure') }}
         run: |
           # Plain text. The facts are runner names, inventory host ids, counts and
@@ -396,11 +402,15 @@ jobs:
           # of runner-restart.yml), so the helper lists this repo's recent
           # runner-health runs, reads their jobs and counts the failed
           # auto-restart legs -- `auto-restart (...) / restart-runner
-          # (<runner>)` -- with GITHUB_TOKEN (actions: read above). It never
+          # (<runner>)`, matched on the ` / restart-runner (<runner>)` suffix
+          # alone so a name: on the caller job cannot silently break detection
+          # (OPS-106 R1) -- with GITHUB_TOKEN (this workflow's `actions: write`
+          # above includes the read it needs, OPS-106 R3). It never
           # fails this job: an API error or a helper crash warns, and its
           # --incomplete marker then makes the dedupe keep its state instead
           # of sending a false "RESOLVED" (the findings that could be read
-          # still page).
+          # still page, and the restart keys last seen are carried forward,
+          # so the blip drops no key from the fingerprint, OPS-106 R2).
           RESTART_MSG="$RUNNER_TEMP/restart.txt"
           RESTART_KEYS="$RUNNER_TEMP/restart-keys.txt"
           RESTART_INCOMPLETE="$RUNNER_TEMP/restart-incomplete.txt"
