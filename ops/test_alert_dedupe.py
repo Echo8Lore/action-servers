@@ -10,10 +10,12 @@ exits 0); keys ignore prose and counts; per-host disk keys from the jobs API leg
 (OPS-45), a second host crossing pages at once, API failure falls back to one "disk" key;
 restart-path-failing:<runner> keys from ops/restart_liveness.py (OPS-48) page, dedupe
 and clear like any other condition -- a restart-path check that could not run
-(incomplete) never ends in a false RESOLVED (PR #24 rework), and while it is incomplete
-the restart keys of the last page are carried forward, so a liveness-API blip neither
-drops a restart-path-failing key from the fingerprint nor re-pages when the key returns
-(OPS-106 R2: the blip used to cost up to 2 extra pages).
+(incomplete) never ends in a false RESOLVED (PR #24 rework), and while that check
+itself is incomplete the restart keys of the last page are carried forward, so a
+liveness-API blip neither drops a restart-path-failing key from the fingerprint nor
+re-pages when the key returns (OPS-106 R2: the blip used to cost up to 2 extra
+pages). The carry rides the restart check's OWN --restart-incomplete flag (OPS-108):
+an incomplete check-disk/stale/scheduler run blocks the RESOLVED but carries nothing.
 """
 
 import datetime as dt
@@ -229,10 +231,15 @@ class Decide(unittest.TestCase):
         # again, the still-live condition stays deduped (no extra page).
         # OPS-106 R2 moved the blip's action from "none" to "suppress" (the
         # carried key keeps the fingerprint non-empty and unchanged) -- the
-        # user-visible outcome is the same: nothing sent, state kept.
+        # user-visible outcome is the same: nothing sent, state kept. The
+        # workflow passes BOTH flags when the restart check could not run:
+        # --restart-incomplete (the carry) and --incomplete (the restart
+        # check's marker widens the workflow's INCOMPLETE like every failed
+        # check).
         keys = ["restart-path-failing:r1"]
         _, _, st = ad.decide({}, keys, "m", T0)
-        action, text, st2 = ad.decide(st, [], "", later(30), incomplete=True)
+        action, text, st2 = ad.decide(st, [], "", later(30), incomplete=True,
+                                      restart_incomplete=True)
         self.assertEqual((action, text), ("suppress", ""))
         self.assertEqual(st2, st)
         self.assertEqual(ad.decide(st, keys, "m", later(60))[0], "suppress")
@@ -250,7 +257,8 @@ class Decide(unittest.TestCase):
         action, _, st = ad.decide({}, keys, "m", T0)
         self.assertEqual(action, "page")
         blipped = ["offline:r1"]                  # the runs API failed: no restart keys
-        action, text, st2 = ad.decide(st, blipped, "m2", later(30), incomplete=True)
+        action, text, st2 = ad.decide(st, blipped, "m2", later(30), incomplete=True,
+                                      restart_incomplete=True)
         self.assertEqual((action, text), ("suppress", ""))   # the OLD code paged here
         self.assertEqual(st2, st)
         # The check sees the failed leg again: still no page.
@@ -265,7 +273,8 @@ class Decide(unittest.TestCase):
         keys = ["restart-path-failing:r-alpha", "restart-path-failing:r-beta"]
         _, _, st = ad.decide({}, keys, "m", T0)
         partial = ["restart-path-failing:r-beta"]   # r-alpha's run was not readable
-        action, text, st2 = ad.decide(st, partial, "m2", later(30), incomplete=True)
+        action, text, st2 = ad.decide(st, partial, "m2", later(30), incomplete=True,
+                                      restart_incomplete=True)
         self.assertEqual((action, text), ("suppress", ""))
         self.assertEqual(st2, st)
 
@@ -277,12 +286,14 @@ class Decide(unittest.TestCase):
         keys = ["offline:r1", "restart-path-failing:r1"]
         _, _, st = ad.decide({}, keys, "m", T0)
         grew = ["offline:r1", "restart-path-failing:r2"]
-        action, text, st2 = ad.decide(st, grew, "m2", later(30), incomplete=True)
+        action, text, st2 = ad.decide(st, grew, "m2", later(30), incomplete=True,
+                                      restart_incomplete=True)
         self.assertEqual((action, text), ("page", "m2"))
         self.assertEqual(st2["restart_keys"],
                          ["restart-path-failing:r1", "restart-path-failing:r2"])
         # And the carried pair survives the next blip.
-        action, _, _ = ad.decide(st2, ["offline:r1"], "m3", later(60), incomplete=True)
+        action, _, _ = ad.decide(st2, ["offline:r1"], "m3", later(60), incomplete=True,
+                                restart_incomplete=True)
         self.assertEqual(action, "suppress")
 
     def test_healed_path_drops_its_key_on_the_first_complete_check(self):
@@ -291,20 +302,55 @@ class Decide(unittest.TestCase):
         # check sees it gone -- the condition set changed for real.
         keys = ["restart-path-failing:r1"]
         _, _, st = ad.decide({}, keys, "m", T0)
-        _, _, st = ad.decide(st, [], "", later(30), incomplete=True)   # blip: state kept
+        _, _, st = ad.decide(st, [], "", later(30), incomplete=True,
+                             restart_incomplete=True)   # blip: state kept
         action, _, st2 = ad.decide(st, [], "", later(60))              # complete, clear
         self.assertEqual(action, "resolved")
         self.assertEqual(st2, {"fingerprint": "", "paged_at": None, "restart_keys": []})
 
+    def test_other_check_incomplete_does_not_carry_restart_keys(self):
+        # OPS-108 item 1, the review's exact case: r1 is back online and the
+        # restart check ran CLEAN (no restart keys), but check-stale-jobs
+        # failed. INCOMPLETE (any check) still blocks the RESOLVED, but it
+        # must NOT carry the healed runner's restart key forward: the old
+        # code paged here (empty message, nothing sent) and kept the stale
+        # key alive in the state, delaying RESOLVED while the other check
+        # kept failing -- it failed toward paging.
+        keys = ["offline:r1", "restart-path-failing:r1"]
+        _, _, st = ad.decide({}, keys, "m", T0)
+        self.assertEqual(st["restart_keys"], ["restart-path-failing:r1"])
+        action, text, st2 = ad.decide(st, [], "", later(30), incomplete=True)
+        self.assertEqual((action, text), ("none", ""))   # the OLD code paged here
+        self.assertEqual(st2, st)
+        # The stale-jobs check heals, every check completes: the fleet really
+        # is healthy, and the delayed RESOLVED finally goes out.
+        action, _, st3 = ad.decide(st, [], "", later(60))
+        self.assertEqual(action, "resolved")
+        self.assertEqual(st3, {"fingerprint": "", "paged_at": None, "restart_keys": []})
+
+    def test_restart_incomplete_alone_never_resolves(self):
+        # Belt-and-braces: --restart-incomplete WITHOUT --incomplete (a
+        # wiring mistake away) still means "the restart path was not
+        # checked": the carried key keeps the fingerprint non-empty, nothing
+        # is sent, no RESOLVED, state kept.
+        keys = ["restart-path-failing:r1"]
+        _, _, st = ad.decide({}, keys, "m", T0)
+        action, text, st2 = ad.decide(st, [], "", later(30), restart_incomplete=True)
+        self.assertEqual((action, text), ("suppress", ""))
+        self.assertEqual(st2, st)
+
     def test_old_state_without_restart_keys_carries_nothing(self):
         # A state written before OPS-106 (or a malformed restart_keys field)
-        # carries nothing: one transition blip can still cost the old
-        # behavior, exactly once -- and no junk or other condition's key can
-        # be smuggled into the carried set.
+        # carries nothing -- and since a suppress keeps that state, the old
+        # blip behavior can recur until the next page or REPEAT records
+        # restart keys (up to --repeat-min, 6 h by default; OPS-108 item 2
+        # wording). No junk or other condition's key can be smuggled into
+        # the carried set either.
         st = {"fingerprint": ad.fingerprint(["restart-path-failing:r1"]),
               "paged_at": "2026-09-27T12:00:00Z"}
         self.assertEqual(ad.normalize_state(st)["restart_keys"], [])
-        action, _, _ = ad.decide(st, [], "", later(30), incomplete=True)
+        action, _, _ = ad.decide(st, [], "", later(30), incomplete=True,
+                                restart_incomplete=True)
         self.assertEqual(action, "none")       # nothing to carry: old behavior
         st["restart_keys"] = [5, None, "restart-path-failing:r1", "offline:r1"]
         self.assertEqual(ad.normalize_state(st)["restart_keys"],
@@ -380,16 +426,35 @@ class Main(unittest.TestCase):
     def test_incomplete_restart_blip_sends_nothing(self):
         # OPS-106 R2, end to end through the CLI: a restart-path-failing key
         # is live beside the offline runner's own key, and the runs API fails
-        # (empty --restart-keys file, --incomplete true). The carried key
-        # keeps the fingerprint unchanged: SEND stays empty (no page), the
-        # state is kept, and nothing resolves.
+        # (empty --restart-keys file; the workflow then passes --incomplete
+        # true AND --restart-incomplete true, its INCOMPLETE widened by the
+        # restart check's own marker). The carried key keeps the fingerprint
+        # unchanged: SEND stays empty (no page), the state is kept, and
+        # nothing resolves.
         d = pathlib.Path(self.tmp.name)
         (d / "rk").write_text("")
         st = {"fingerprint": ad.fingerprint(["offline:r1", "restart-path-failing:r1"]),
               "paged_at": "2026-09-27T11:30:00Z",
               "restart_keys": ["restart-path-failing:r1"]}
         out, new, _ = self.run_main(st, any_offline="true", offline_runners='["r1"]',
-                                    restart_keys=str(d / "rk"), incomplete="true")
+                                    restart_keys=str(d / "rk"), incomplete="true",
+                                    restart_incomplete="true")
+        self.assertEqual(out, "")
+        self.assertEqual(new, st)
+
+    def test_other_check_incomplete_carries_nothing_cli(self):
+        # OPS-108 item 1 through the CLI, the review's exact repro: the state
+        # holds offline:r1 + restart-path-failing:r1; the runner is back, the
+        # restart check is clean (no --restart-keys file, no
+        # --restart-incomplete), but check-stale-jobs failed (--incomplete
+        # true). Nothing is carried: the empty message is not sent, the state
+        # is kept -- the old code recorded a page on the resurrected key here,
+        # so the stale restart key survived in the state and the RESOLVED
+        # was delayed while the stale check kept failing.
+        st = {"fingerprint": ad.fingerprint(["offline:r1", "restart-path-failing:r1"]),
+              "paged_at": "2026-09-27T11:30:00Z",
+              "restart_keys": ["restart-path-failing:r1"]}
+        out, new, _ = self.run_main(st, message="", incomplete="true")
         self.assertEqual(out, "")
         self.assertEqual(new, st)
 
@@ -485,6 +550,12 @@ class Wiring(unittest.TestCase):
                       job)
         # The indented assignment, not a mention in a comment.
         self.assertIn('\n            INCOMPLETE=true\n', job)
+        # OPS-108: the carry flag is the restart check's OWN incompleteness,
+        # set beside INCOMPLETE above and passed to the dedupe as its own
+        # --restart-incomplete; the indented assignments, not comments.
+        self.assertIn('\n          RESTART_INC=false\n', job)
+        self.assertIn('\n            RESTART_INC=true\n', job)
+        self.assertIn('--restart-incomplete "$RESTART_INC"', job)
 
 
 if __name__ == "__main__":

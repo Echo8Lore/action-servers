@@ -327,7 +327,9 @@ jobs:
   # Telegram accepted the message, so a failed send pages again next run. The
   # remembered restart_keys are what an incomplete restart-path check carries
   # forward, so a GitHub API blip drops no restart-path-failing key from the
-  # fingerprint (no re-page on the blip, none when it returns, OPS-106 R2). If
+  # fingerprint (no re-page on the blip, none when it returns, OPS-106 R2) --
+  # carried only on the restart check's OWN incompleteness (--restart-
+  # incomplete, OPS-108: another check's failure carries nothing). If
   # the cache is evicted, an ongoing incident pages once more: that errs toward
   # paging. If the helper itself fails, the message is sent undeduplicated.
   #
@@ -370,10 +372,11 @@ jobs:
           SCHEDULER_KEYS: ${{ needs.check-scheduler.outputs.keys }}
           # "No condition" only means "healthy" when the checks really ran: a failed
           # check job -- or a restart-path check that could not complete (the
-          # INCOMPLETE=true below) -- must not produce a RESOLVED, and while it is
-          # incomplete the dedupe carries the restart keys it last saw forward, so
-          # the blip drops no restart-path-failing key from the fingerprint
-          # (OPS-106 R2).
+          # INCOMPLETE=true below) -- must not produce a RESOLVED. Only the
+          # restart-path check's OWN incompleteness (RESTART_INC below) makes the
+          # dedupe carry the restart keys it last saw forward, so the blip drops
+          # no restart-path-failing key from the fingerprint (OPS-106 R2);
+          # another check failing carries nothing (OPS-108).
           INCOMPLETE: ${{ needs.check-runners.result != 'success' || needs.check-stale-jobs.result != 'success' || needs.check-scheduler.result == 'failure' || needs.check-scheduler.result == 'cancelled' || (needs.check-disk.result != 'success' && needs.check-disk.result != 'failure') }}
         run: |
           # Plain text. The facts are runner names, inventory host ids, counts and
@@ -403,13 +406,15 @@ jobs:
           # runner-health runs, reads their jobs and counts the failed
           # auto-restart legs -- `auto-restart (...) / restart-runner
           # (<runner>)`, matched on the ` / restart-runner (<runner>)` suffix
-          # alone so a name: on the caller job cannot silently break detection
-          # (OPS-106 R1) -- with GITHUB_TOKEN (this workflow's `actions: write`
+          # as the name's ENDING, so a name: on the caller job cannot silently
+          # break detection (OPS-106 R1) and a merely-similar job name cannot
+          # page (OPS-108) -- with GITHUB_TOKEN (this workflow's `actions: write`
           # above includes the read it needs, OPS-106 R3). It never
           # fails this job: an API error or a helper crash warns, and its
           # --incomplete marker then makes the dedupe keep its state instead
           # of sending a false "RESOLVED" (the findings that could be read
-          # still page, and the restart keys last seen are carried forward,
+          # still page, and the restart keys last seen are carried forward
+          # -- RESTART_INC, OPS-108: another check's failure carries nothing --
           # so the blip drops no key from the fingerprint, OPS-106 R2).
           RESTART_MSG="$RUNNER_TEMP/restart.txt"
           RESTART_KEYS="$RUNNER_TEMP/restart-keys.txt"
@@ -420,9 +425,17 @@ jobs:
             || echo "::warning::restart liveness helper failed; restart-path not checked"
           # Missing marker or "true" = the restart path was not fully checked
           # this run: "no restart keys" then means "not checked", never "cleared".
+          # RESTART_INC marks the restart check's OWN incompleteness (OPS-108):
+          # it widens INCOMPLETE like every failed check, and only it lets the
+          # dedupe carry the last restart keys forward -- an incomplete
+          # check-disk/stale/scheduler run sets INCOMPLETE alone, so a restart
+          # key that healed is not resurrected while another check keeps
+          # failing.
+          RESTART_INC=false
           if [ ! -f "$RESTART_INCOMPLETE" ] || grep -qx true "$RESTART_INCOMPLETE"; then
             echo "::warning::restart-path check incomplete; suppressing any RESOLVED this run."
             INCOMPLETE=true
+            RESTART_INC=true
           fi
           RESTART_MESSAGE=$(cat "$RESTART_MSG" 2>/dev/null || true)
 
@@ -475,7 +488,8 @@ jobs:
             --stale-count "$STALE_COUNT" --stale-summary="$STALE_SUMMARY" \
             --scheduler-keys="$SCHEDULER_KEYS" \
             --restart-keys "$RESTART_KEYS" \
-            --incomplete "$INCOMPLETE" --test-alert "$TEST_ALERT" || drc=$?
+            --incomplete "$INCOMPLETE" --restart-incomplete "$RESTART_INC" \
+            --test-alert "$TEST_ALERT" || drc=$?
           if [ "$drc" -ne 0 ]; then
             echo "::warning::alert dedupe failed (exit ${drc}); sending undeduplicated, state unchanged."
             cp "$RUNNER_TEMP/alert.txt" "$RUNNER_TEMP/send.txt"
