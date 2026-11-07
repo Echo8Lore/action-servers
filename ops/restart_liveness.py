@@ -24,10 +24,13 @@ run's jobs, and counts the failed legs of the auto-restart job. Their names are
 `auto-restart (...) / restart-runner (<runner>)`: the jobs API renders a called
 job as `<caller job leg> / <called job name>`, and the called job's name
 carries the target (runner-restart.yml, OPS-48). Only the
-` / restart-runner (<runner>)` suffix is matched -- the caller leg's own name
-is never required -- so a `name:` later added to the auto-restart job cannot
-silently break detection (OPS-106 R1: the match used to require the composite
-to start with 'auto-restart'). A leg of the pre-name shape
+` / restart-runner (<runner>)` suffix is matched, ANCHORED at the END of the
+name -- the caller leg's own name is never required, so a `name:` later added
+to the auto-restart job cannot silently break detection (OPS-106 R1: the match
+used to require the composite to start with 'auto-restart'), and a job that
+merely CONTAINS the suffix (`x / restart-runner-foo (a)`) is not a leg and
+cannot page restart-path-failing:? (OPS-108 item 3: before the anchor, an
+rfind matched that suffix anywhere in the name). A leg of the pre-name shape
 (`... / restart-runner`, job id only) cannot say its runner and maps to `?`,
 like offline:? -- that is stable: the name never changes while the run sits in
 the window. No event filter: every run of this workflow is a monitor run, and
@@ -68,6 +71,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -81,6 +85,15 @@ CALLER_JOB = "auto-restart"       # runner-health.yml's job that calls runner-re
                                   # break detection (OPS-106 R1)
 CALLED_JOB = "restart-runner"     # runner-restart.yml's job; its name carries the target
 JOB_SEP = " / "                   # how the jobs API renders a called job: <caller> / <called>
+# The composite always ENDS with the called job: `... / restart-runner`,
+# optionally followed by ` (<target>)` -- the called job's name template
+# (runner-restart.yml) always closes its paren. The match is anchored at the
+# END of the name, so a job that merely CONTAINS the suffix
+# (`x / restart-runner-foo (a)`) is a different job and never pages
+# restart-path-failing:? (OPS-108 item 3; the OPS-106 R1 rework still used
+# rfind, which matched the suffix anywhere).
+LEG_NAME_RE = re.compile(
+    f"{re.escape(JOB_SEP)}{re.escape(CALLED_JOB)}(?: \\((.*)\\))?$")
 # A restart leg that timed out is as broken as one that failed: either way the
 # automated path did not get the runner back (cancelled legs are operator kills
 # and never count).
@@ -158,20 +171,19 @@ def run_jobs(api, repo, run_id):
 
 def restart_target(name):
     """A job name from a runner-health run -> (is auto-restart leg, target or
-    None). Matched on the ` / restart-runner (...)` suffix ALONE (`rfind`: the
-    composite always ends with the called job, and nothing in the caller-side
-    rendering can shadow it): the caller leg's name is never required, so a
-    `name:` added to the auto-restart job cannot silently break detection
-    (OPS-106 R1). `?` legs (called job without the target-carrying name)
-    return (True, None)."""
+    None). Matched on the ` / restart-runner (...)` suffix ANCHORED at the END
+    of the name (LEG_NAME_RE; the composite always ends with the called job):
+    the caller leg's name is never required, so a `name:` added to the
+    auto-restart job cannot silently break detection (OPS-106 R1), and a job
+    that merely CONTAINS the suffix (`x / restart-runner-foo (a)`) is rejected
+    instead of paging restart-path-failing:? (OPS-108 item 3). `?` legs
+    (called job without the target-carrying name) return (True, None)."""
     name = (name or "").strip()
-    i = name.rfind(f"{JOB_SEP}{CALLED_JOB}")
-    if i < 0:
+    m = LEG_NAME_RE.search(name)
+    if not m:
         return False, None
-    rest = name[i + len(JOB_SEP) + len(CALLED_JOB):].strip()
-    if rest.startswith("(") and rest.endswith(")") and rest[1:-1].strip():
-        return True, rest[1:-1].strip()
-    return True, None
+    target = (m.group(1) or "").strip()
+    return True, (target or None)
 
 
 def check(api, repo, now, window_min, warn, log):

@@ -10,9 +10,12 @@ runner-restart.yml run (the first round of PR #24 looked for workflow_call
 runs that do not exist, so its alert could never fire). A failed
 `auto-restart (...) / restart-runner (<runner>)` leg raises exactly one deduped
 CRITICAL restart-path-failing:<runner> condition; the match is on the
-` / restart-runner (<runner>)` suffix ALONE, so a `name:` added to the
-auto-restart job cannot silently break detection (OPS-106 R1 -- the old
-matcher required the composite to start with 'auto-restart'); healthy,
+` / restart-runner (<runner>)` suffix ALONE, ANCHORED at the END of the name,
+so a `name:` added to the auto-restart job cannot silently break detection
+(OPS-106 R1 -- the old matcher required the composite to start with
+'auto-restart') and a job merely CONTAINING the suffix
+(`x / restart-runner-foo (a)`) cannot page restart-path-failing:? (OPS-108 --
+the old rfind matched it anywhere); healthy,
 skipped, cancelled and non-restart jobs never count, and neither does the
 run's own conclusion matter; a jobs-API error marks the check incomplete
 instead of flapping a '?' key (no false RESOLVED, no double pages); a leg
@@ -306,11 +309,26 @@ class RestartTarget(unittest.TestCase):
     def test_pre_name_leg_is_unmappable(self):
         # The real called job name before OPS-48 (verbatim from dispatch run
         # 36364769843's job): an auto-restart leg that cannot say its runner.
+        # The unbalanced `... / restart-runner (a` shape moved to the
+        # near-miss rejection test: the anchored matcher cannot accept it,
+        # and the called job's template always closes its paren (pinned by
+        # test_matches_the_workflow_jobs), so no real leg is dropped.
         for name in (f"{CALLER_LEG} / restart-runner",
                      "auto-restart / restart-runner",
-                     f"{CALLER_LEG} / restart-runner ()",
-                     f"{CALLER_LEG} / restart-runner (a"):
+                     f"{CALLER_LEG} / restart-runner ()"):
             self.assertEqual(rl.restart_target(name), (True, None), name)
+
+    def test_near_miss_names_are_not_legs(self):
+        # OPS-108 item 3: the suffix match is ANCHORED at the END of the name.
+        # A job that merely CONTAINS " / restart-runner" is a different job --
+        # the old rfind matcher paged restart-path-failing:? for exactly these
+        # shapes, and no current job name triggers it, so only the tests pin it.
+        for name in (f"{CALLER_LEG} / restart-runner-foo (a)",   # the review's case
+                     "x / restart-runner-foo (a)",
+                     "auto-restart / restart-runner-not (r1)",
+                     f"{CALLER_LEG} / restart-runner (a) extra",
+                     f"{CALLER_LEG} / restart-runner (a"):         # unbalanced: not renderable
+            self.assertEqual(rl.restart_target(name), (False, None), name)
 
     def test_rejects_everything_else(self):
         for name in ("auto-restart",                          # the real skipped job
@@ -368,6 +386,18 @@ class Check(unittest.TestCase):
                                              name="custom restart leg (x) / restart-runner (org-runner-01)")]}})
         out, complete, _ = self.check(api)
         self.assertEqual([k for _, k in out], ["restart-path-failing:org-runner-01"])
+        self.assertTrue(complete)
+
+    def test_failed_near_miss_job_never_pages(self):
+        # OPS-108 item 3 end to end: a FAILED job whose name merely contains
+        # the suffix is not an auto-restart leg -- it pages nothing and the
+        # check still completes (the old rfind matcher paged
+        # restart-path-failing:? for it).
+        near = dict(failed_leg(), name="x / restart-runner-foo (a)")
+        api = Stub({RUNS_Q: {"workflow_runs": [run(1)]},
+                    jobs_q(1): {"jobs": HEALTH_JOBS["jobs"] + [near]}})
+        out, complete, _ = self.check(api)
+        self.assertEqual(out, [])
         self.assertTrue(complete)
 
     def test_real_healthy_payload_pages_nothing(self):
