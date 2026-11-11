@@ -50,7 +50,7 @@ runners:
     host: ovh-staging
     scope: repo
     target: ResearchMonkey/warhammer-40k-database
-    labels: [self-hosted, Linux, X64, vps, ci-runner, warhammer]
+    labels: [self-hosted, Linux, X64, vps, ci-runner, warhammer, wh40k-runner-01]
     systemd_unit: actions.runner.ResearchMonkey-warhammer-40k-database.wh40k-runner-01.service
 
   - name: personal-fieldkit-01
@@ -78,5 +78,5 @@ runners:
     host: ovh-devops-001
     scope: repo
     target: ResearchMonkey/warhammer-40k-database
-    labels: [self-hosted, Linux, X64, vps, ci-runner, warhammer]
+    labels: [self-hosted, Linux, X64, vps, ci-runner, warhammer, wh40k-runner-02]
     systemd_unit: actions.runner.ResearchMonkey-warhammer-40k-database.wh40k-runner-02.service
