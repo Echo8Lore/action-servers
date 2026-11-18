@@ -5,6 +5,7 @@
 #
 # Usage:
 #   sudo bash bootstrap-host.sh
+#   bash bootstrap-host.sh --list-packages   # dry run: print the per-project packages, change nothing
 #
 # Prerequisites:
 #   - Ubuntu 22.04+ with root/sudo access
@@ -30,6 +31,13 @@
 
 set -euo pipefail
 
+LIST_ONLY=0
+case "${1:-}" in
+  "") ;;
+  --list-packages) LIST_ONLY=1 ;;
+  *) echo "ERROR: unknown argument '$1' (only --list-packages)" >&2; exit 2 ;;
+esac
+
 RUNNER_USER="${RUNNER_USER:-runner}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGES_DIR="${PACKAGES_DIR:-${HERE}/packages.d}"
@@ -38,7 +46,7 @@ echo "=== action-servers — host bootstrap ==="
 echo "Service user: ${RUNNER_USER}"
 echo ""
 
-if [[ $EUID -ne 0 ]]; then
+if [[ $LIST_ONLY -eq 0 && $EUID -ne 0 ]]; then
   echo "ERROR: run as root (sudo bash bootstrap-host.sh)" >&2
   exit 1
 fi
@@ -86,6 +94,14 @@ for list in "$PACKAGES_DIR"/*.txt; do
   done < "$list"
 done
 shopt -u nullglob
+
+if [[ $LIST_ONLY -eq 1 ]]; then   # OPS-181: dry run, after the lists are checked and before any change
+  echo "Per-project packages (first installable alternative wins):"
+  for entry in "${pkg_lines[@]}"; do
+    echo "  ${entry%%$'\t'*}: ${entry#*$'\t'}"
+  done
+  exit 0
+fi
 
 # ── needrestart: never auto-restart runner units or containerd (OPS-49/51) ──
 # Ubuntu's apt hook (/etc/apt/apt.conf.d/99needrestart) runs needrestart in (a)uto
