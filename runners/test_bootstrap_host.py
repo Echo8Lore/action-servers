@@ -161,5 +161,34 @@ class Behaviour(unittest.TestCase):
         self.assertEqual(self.collect(), ["__ABSENT__ needrestart not installed"])
 
 
+class ListPackagesTest(unittest.TestCase):
+    """OPS-181: --list-packages is a dry run that needs no root and changes nothing."""
+
+    def run_list(self, *args, packages_dir=None):
+        env = dict(os.environ)
+        if packages_dir:
+            env["PACKAGES_DIR"] = str(packages_dir)
+        return subprocess.run(["bash", str(ROOT / "runners" / "bootstrap-host.sh"), *args],
+                              capture_output=True, text=True, env=env, timeout=30)
+
+    def test_lists_every_project_package_including_poppler(self):
+        r = self.run_list("--list-packages")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("wh40k.txt: poppler-utils", r.stdout)
+        self.assertIn("wh40k.txt: libzbar0t64|libzbar0", r.stdout)
+        self.assertNotIn(">>> Installing", r.stdout)
+
+    def test_a_bad_list_still_fails_the_dry_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            pathlib.Path(d, "x.txt").write_text("two names\n")
+            r = self.run_list("--list-packages", packages_dir=d)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("holds more than one name", r.stderr)
+
+    def test_an_unknown_argument_is_refused(self):
+        r = self.run_list("--bogus")
+        self.assertEqual(r.returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
